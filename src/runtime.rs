@@ -53,6 +53,27 @@ pub const STAIRS_ROLL_MIN: i32 = 80;
 pub const STAIRS_RISE: i32 = 4;
 /// `SideRoom`'s bounds: 10 along the corridor, 5 deep, 5 high.
 pub const ROOM_DIMS: [i32; 3] = [10, 5, 5];
+/// `OreDeposit`'s box: 5 wide, 5 high, 4 long.
+pub const ORE_DEPOSIT_DIMS: [i32; 3] = [5, 5, 4];
+/// `ZombieVillagerRoom`'s box: 7 by 5 by 7.
+pub const ZOMBIE_ROOM_DIMS: [i32; 3] = [7, 5, 7];
+/// `ConfigModule.Ores`' defaults: cobble, coal, iron, redstone, gold, lapis, emerald, diamond.
+pub const ORE_WEIGHTS: [i32; 8] = [50, 20, 9, 7, 7, 3, 3, 1];
+/// `ConfigModule.SpawnRates.zombieVillagerRoomSpawnRate`: out of 100, at a branch's end.
+pub const ZOMBIE_ROOM_SPAWN_RATE: i32 = 2;
+
+/// The ore a `nextInt(100)` draw picks (`OreDeposit.addChildren`): the index into
+/// [`ORE_WEIGHTS`] whose running total first passes the draw, cobble when none does.
+pub fn ore_for_roll(roll: i32) -> i32 {
+    let mut total = 0;
+    for (index, weight) in ORE_WEIGHTS.iter().enumerate() {
+        total += weight;
+        if roll < total {
+            return index as i32;
+        }
+    }
+    0
+}
 /// `VerticalEntrance.SHAFT_LOCAL_XZ_START..=END` is 22..=26 in a 49-wide bounds: a 5×5 shaft.
 pub const SHAFT_DIMS: [i32; 3] = [5, 5, 5];
 /// `BetterMineshaftGenerator.generateAndAddBigTunnelPiece`: `chainLength > 3` stops the corridor.
@@ -290,6 +311,10 @@ pub enum PieceKind {
     Stairs,
     /// The 10×5×5 workstation room.
     Room,
+    /// The 5×5×4 pocket of ore at the end of a branch (`OreDeposit`).
+    OreDeposit,
+    /// The 7×5×7 room with an iron door and a zombie villager spawner (`ZombieVillagerRoom`).
+    ZombieRoom,
 }
 
 impl PieceKind {
@@ -300,6 +325,8 @@ impl PieceKind {
             Self::Branch => "branch",
             Self::Stairs => "stairs",
             Self::Room => "room",
+            Self::OreDeposit => "ore_deposit",
+            Self::ZombieRoom => "zombie_room",
         }
     }
 
@@ -310,6 +337,8 @@ impl PieceKind {
             "branch" => Some(Self::Branch),
             "stairs" => Some(Self::Stairs),
             "room" => Some(Self::Room),
+            "ore_deposit" => Some(Self::OreDeposit),
+            "zombie_room" => Some(Self::ZombieRoom),
             _ => None,
         }
     }
@@ -334,6 +363,8 @@ pub struct PieceSpec {
     pub depth: i32,
     /// Corridors only: the wall openings for the branches and rooms hanging off this segment.
     pub openings: Vec<Opening>,
+    /// An ore deposit's ore, an index into [`ORE_WEIGHTS`]; 0 for every other kind.
+    pub variant: i32,
 }
 
 impl PieceSpec {
@@ -370,6 +401,8 @@ impl PieceSpec {
             PieceKind::Branch => BRANCH_DIMS,
             PieceKind::Stairs => STAIRS_DIMS,
             PieceKind::Room => ROOM_DIMS,
+            PieceKind::OreDeposit => ORE_DEPOSIT_DIMS,
+            PieceKind::ZombieRoom => ZOMBIE_ROOM_DIMS,
         };
         let height = if self.kind == PieceKind::Entrance {
             self.bounds.span()[1].max(height)
@@ -432,13 +465,15 @@ impl Assembly {
     /// The readout's one-line summary: `9 pieces (entrance 1, corridor 3, branch 3, stairs 1, room 2)`.
     pub fn summary(&self) -> String {
         let mut text = format!(
-            "{} pieces (entrance {}, corridor {}, branch {}, stairs {}, room {})",
+            "{} pieces (entrance {}, corridor {}, branch {}, stairs {}, room {}, ore deposit {}, zombie room {})",
             self.total(),
             self.count(PieceKind::Entrance),
             self.count(PieceKind::Corridor),
             self.count(PieceKind::Branch),
             self.count(PieceKind::Stairs),
             self.count(PieceKind::Room),
+            self.count(PieceKind::OreDeposit),
+            self.count(PieceKind::ZombieRoom),
         );
         if self.truncated {
             text.push_str(", truncated by the budget");
@@ -584,6 +619,7 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
         facing: request.facing,
         depth: -1,
         openings: Vec::new(),
+        variant: 0,
     };
     push(&mut assembly, entrance, request.budget);
 
@@ -607,6 +643,7 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
             facing: request.facing,
             depth,
             openings: Vec::new(),
+            variant: 0,
         };
         let Some(corridor_index) = push(&mut assembly, corridor, request.budget) else {
             break;
@@ -622,6 +659,7 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
                 left_of(request.facing)
             };
             let mut branch_floor = floor_y;
+            let mut complete = true;
             let mut branch_near = offset_off_wall(&bounds, request.facing, side);
             let side_step = side.step();
             for chain in 0..MAX_BRANCH_SEGMENTS {
@@ -646,8 +684,10 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
                     facing: side,
                     depth,
                     openings: Vec::new(),
+                    variant: 0,
                 };
                 if push(&mut assembly, branch, request.budget).is_none() {
+                    complete = false;
                     break;
                 }
                 branch_floor += if stairs { STAIRS_RISE } else { 0 };
@@ -656,6 +696,25 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
                     branch_floor,
                     near[2] + side_step[2] * dims[2],
                 ];
+            }
+            if complete {
+                // The end of the run (`generateAndAddSmallTunnelPiece`'s last link): a zombie villager
+                // room one time in fifty, else a pocket of ore.
+                let (kind, dims, variant) = if random.next_i32(100) < ZOMBIE_ROOM_SPAWN_RATE {
+                    (PieceKind::ZombieRoom, ZOMBIE_ROOM_DIMS, 0)
+                } else {
+                    let ore = ore_for_roll(random.next_i32(100));
+                    (PieceKind::OreDeposit, ORE_DEPOSIT_DIMS, ore)
+                };
+                let end = PieceSpec {
+                    kind,
+                    bounds: piece_box(branch_near, side, dims),
+                    facing: side,
+                    depth,
+                    openings: Vec::new(),
+                    variant,
+                };
+                push(&mut assembly, end, request.budget);
             }
         }
 
@@ -679,6 +738,7 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
                 facing: side,
                 depth,
                 openings: Vec::new(),
+                variant: 0,
             };
             push(&mut assembly, room, request.budget);
         }
@@ -1217,9 +1277,10 @@ mod tests {
         assert_eq!(assembly.count(PieceKind::Branch), 2);
         assert_eq!(assembly.count(PieceKind::Stairs), 1);
         assert_eq!(assembly.count(PieceKind::Room), 1);
+        assert_eq!(assembly.count(PieceKind::OreDeposit), 1);
         assert_eq!(
             assembly.summary(),
-            "9 pieces (entrance 1, corridor 4, branch 2, stairs 1, room 1)"
+            "10 pieces (entrance 1, corridor 4, branch 2, stairs 1, room 1, ore deposit 1, zombie room 0)"
         );
         assert!(!assembly.truncated);
         assert!(assembly.total() <= MAX_PIECES);
@@ -1454,7 +1515,7 @@ mod tests {
         assert!(first.refusal.is_none());
         assert_eq!(
             first.summary(),
-            "15 pieces (entrance 1, corridor 4, branch 6, stairs 3, room 1)"
+            "9 pieces (entrance 1, corridor 3, branch 2, stairs 1, room 1, ore deposit 1, zombie room 0)"
         );
         let lines = status_lines();
         assert_eq!(lines.len(), 3);
@@ -1466,7 +1527,7 @@ mod tests {
         }
         assert!(lines[2].contains(&first.summary()));
         assert!(
-            lines[2].contains("stairs 3"),
+            lines[2].contains("stairs 1"),
             "the readout names the stair kind"
         );
     }
@@ -1780,5 +1841,33 @@ mod tests {
             !Box3::new([0, 0, 0], [1_000_000, 0, 0]).is_plausible(),
             "an attacker-sized axis"
         );
+    }
+
+    #[test]
+    fn ore_rolls_follow_the_default_weights() {
+        // 50 cobble, 20 coal, 9 iron, 7 redstone, 7 gold, 3 lapis, 3 emerald, 1 diamond.
+        let picks: Vec<i32> = [0, 49, 50, 69, 70, 78, 79, 85, 86, 92, 93, 95, 96, 98, 99]
+            .iter()
+            .map(|roll| ore_for_roll(*roll))
+            .collect();
+        assert_eq!(picks, [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7]);
+        assert_eq!(ORE_WEIGHTS.iter().sum::<i32>(), 100);
+    }
+
+    #[test]
+    fn a_branch_ends_in_an_ore_deposit_or_a_zombie_room() {
+        let assembly = assemble_with(320);
+        let end = assembly
+            .pieces
+            .iter()
+            .find(|piece| piece.kind == PieceKind::OreDeposit)
+            .expect("seed 320 ends a branch in ore");
+        assert_eq!(end.bounds.span(), ORE_DEPOSIT_DIMS);
+        let last_branch = assembly
+            .pieces
+            .iter()
+            .rfind(|piece| matches!(piece.kind, PieceKind::Branch | PieceKind::Stairs))
+            .expect("a branch run");
+        assert_eq!(last_branch.facing, end.facing);
     }
 }

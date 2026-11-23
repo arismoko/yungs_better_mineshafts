@@ -47,6 +47,62 @@ const ALWAYS: [(&str, &[(&str, &str)]); 7] = [
     ("minecraft:crafting_table", &[]),
 ];
 
+/// The blocks the ore deposit and the zombie villager room place, resolved once.
+#[derive(Debug)]
+pub struct Extra {
+    pub cobblestone: BlockState,
+    /// `OreDeposit.OreType`'s blocks, in [`runtime::ORE_WEIGHTS`] order.
+    pub ores: [BlockState; 8],
+    pub stone: BlockState,
+    pub stone_bricks: BlockState,
+    pub stone_slab: BlockState,
+    pub cobblestone_slab: BlockState,
+    pub top_stone_slab: BlockState,
+    pub cobblestone_wall: BlockState,
+    pub redstone_torch: BlockState,
+    pub stone_button: BlockState,
+    pub anvil: BlockState,
+    pub smithing_table: BlockState,
+    pub blast_furnace: BlockState,
+    pub spawner: BlockState,
+    pub barrel: BlockState,
+    pub iron_bars: BlockState,
+}
+
+fn resolve_extra(metadata: &dyn BlockMetadata) -> Result<Extra, StructureError> {
+    let s = |name: &str, properties: &[(&str, &str)]| {
+        resolve_state(metadata, &BlockRef::with(name, properties))
+    };
+    let ore = |name: &str| s(name, &[]);
+    Ok(Extra {
+        cobblestone: s("minecraft:cobblestone", &[])?,
+        ores: [
+            s("minecraft:cobblestone", &[])?,
+            ore("minecraft:coal_ore")?,
+            ore("minecraft:iron_ore")?,
+            ore("minecraft:redstone_ore")?,
+            ore("minecraft:gold_ore")?,
+            ore("minecraft:lapis_ore")?,
+            ore("minecraft:emerald_ore")?,
+            ore("minecraft:diamond_ore")?,
+        ],
+        stone: s("minecraft:stone", &[])?,
+        stone_bricks: s("minecraft:stone_bricks", &[])?,
+        stone_slab: s("minecraft:stone_slab", &[])?,
+        cobblestone_slab: s("minecraft:cobblestone_slab", &[])?,
+        top_stone_slab: s("minecraft:stone_slab", &[("type", "top")])?,
+        cobblestone_wall: s("minecraft:cobblestone_wall", &[])?,
+        redstone_torch: s("minecraft:redstone_torch", &[])?,
+        stone_button: s("minecraft:stone_button", &[])?,
+        anvil: s("minecraft:anvil", &[])?,
+        smithing_table: s("minecraft:smithing_table", &[])?,
+        blast_furnace: s("minecraft:blast_furnace", &[])?,
+        spawner: s("minecraft:spawner", &[])?,
+        barrel: s("minecraft:barrel", &[])?,
+        iron_bars: s("minecraft:iron_bars", &[])?,
+    })
+}
+
 /// One randomizer with its states resolved for this run.
 #[derive(Debug)]
 pub struct ResolvedRandomizer {
@@ -98,6 +154,7 @@ pub struct Resolved {
     pub ascending_rails: [BlockState; 4],
     /// The powered ascending rail for the same four directions.
     pub powered_ascending_rails: [BlockState; 4],
+    pub extra: Extra,
 }
 
 /// The four ladder states, in [`Facing`] order.
@@ -191,7 +248,9 @@ pub fn resolve(
     ] = <[BlockState; 7]>::try_from(always).map_err(|_| {
         StructureError("bettermineshafts: the fixed block table is the wrong length".into())
     })?;
+    let extra = resolve_extra(metadata)?;
     Ok(Resolved {
+        extra,
         main: state(&palette.blocks.main)?,
         support: state(&palette.blocks.support)?,
         slab: state(&palette.blocks.slab)?,
@@ -823,6 +882,315 @@ impl Piece {
     }
 }
 
+/// `StructurePiece.chance*` and the fixed-block writers the two new pieces share, in the piece's
+/// own frame (local z runs into the piece's facing, x along its secondary axis).
+impl Piece {
+    fn state_of(
+        &self,
+        ctx: &mut dyn PieceContext,
+        name: &str,
+        properties: &[(&str, &str)],
+    ) -> BlockState {
+        match crate::support::key_for(name) {
+            Some(key) => ctx.state_with(key, properties),
+            None => self.blocks.air,
+        }
+    }
+
+    /// The world direction a direction of upstream's north-facing frame points in for this piece:
+    /// local +z is the piece's facing, local +x its secondary axis.
+    fn world_dir(&self, java: &str) -> &'static str {
+        let toward = |from: [i32; 3], to: [i32; 3]| {
+            let step = [to[0] - from[0], to[2] - from[2]];
+            match step {
+                [1, 0] => "east",
+                [-1, 0] => "west",
+                [0, 1] => "south",
+                _ => "north",
+            }
+        };
+        let origin = self.spec.local_to_world([0, 0, 0]);
+        let plus_z = toward(origin, self.spec.local_to_world([0, 0, 1]));
+        let plus_x = toward(origin, self.spec.local_to_world([1, 0, 0]));
+        let opposite = |name: &'static str| match name {
+            "east" => "west",
+            "west" => "east",
+            "south" => "north",
+            _ => "south",
+        };
+        match java {
+            "north" => plus_z,
+            "south" => opposite(plus_z),
+            "east" => plus_x,
+            _ => opposite(plus_x),
+        }
+    }
+
+    /// Whether the piece's x axis runs against upstream's handedness, which swaps a stair's inner
+    /// left and right.
+    fn mirrored(&self) -> bool {
+        let origin = self.spec.local_to_world([0, 0, 0]);
+        let z = self.spec.local_to_world([0, 0, 1]);
+        let x = self.spec.local_to_world([1, 0, 0]);
+        let (dz, dx) = (
+            [z[0] - origin[0], z[2] - origin[2]],
+            [x[0] - origin[0], x[2] - origin[2]],
+        );
+        // Upstream's north frame has +z north (0, -1) and +x east (1, 0): a cross product of -1.
+        dx[0] * dz[1] - dx[1] * dz[0] > 0
+    }
+
+    fn chance_fill(
+        &self,
+        ctx: &mut dyn PieceContext,
+        chance: f32,
+        from: [i32; 3],
+        to: [i32; 3],
+        state: BlockState,
+    ) {
+        for y in from[1]..=to[1] {
+            for x in from[0]..=to[0] {
+                for z in from[2]..=to[2] {
+                    let local = [x, y, z];
+                    if !self.visible(ctx, local) {
+                        continue;
+                    }
+                    if self.roll(ctx) < chance {
+                        self.set(ctx, local, state);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `chanceReplaceNonAir`: a non-air block is replaced with `chance`.
+    fn chance_replace_non_air(
+        &self,
+        ctx: &mut dyn PieceContext,
+        chance: f32,
+        from: [i32; 3],
+        to: [i32; 3],
+        state: BlockState,
+    ) {
+        for y in from[1]..=to[1] {
+            for x in from[0]..=to[0] {
+                for z in from[2]..=to[2] {
+                    let local = [x, y, z];
+                    if !self.visible(ctx, local) {
+                        continue;
+                    }
+                    if let Some(current) = self.get(ctx, local)
+                        && !ctx.is_air(current)
+                        && self.roll(ctx) < chance
+                    {
+                        self.set(ctx, local, state);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `chanceReplaceSolid`: a solid block is replaced with `chance`.
+    fn chance_replace_solid(
+        &self,
+        ctx: &mut dyn PieceContext,
+        chance: f32,
+        from: [i32; 3],
+        to: [i32; 3],
+        state: BlockState,
+    ) {
+        for y in from[1]..=to[1] {
+            for x in from[0]..=to[0] {
+                for z in from[2]..=to[2] {
+                    let local = [x, y, z];
+                    if !self.visible(ctx, local) {
+                        continue;
+                    }
+                    if self.roll(ctx) < chance
+                        && let Some(current) = self.get(ctx, local)
+                        && ctx.solid_render(current)
+                    {
+                        self.set(ctx, local, state);
+                    }
+                }
+            }
+        }
+    }
+
+    fn block_entity_at(&self, ctx: &mut dyn PieceContext, local: [i32; 3], nbt: Compound) {
+        let pos = self.spec.local_to_world(local);
+        if ctx.chunk_box().is_inside(pos) {
+            ctx.block_entity(pos, nbt);
+        }
+    }
+
+    /// `OreDeposit.postProcess`: a cobblestone shell round a pocket of one ore.
+    fn write_ore_deposit(&self, ctx: &mut dyn PieceContext) {
+        let [width, height, depth] = runtime::ORE_DEPOSIT_DIMS;
+        let end = [width - 1, height - 1, depth - 1];
+        let extra = &self.blocks.extra;
+        let ore = extra.ores[self.spec.variant.clamp(0, 7) as usize];
+        self.chance_replace_solid(ctx, 0.9, [0, 0, 0], end, extra.cobblestone);
+        self.chance_replace_solid(
+            ctx,
+            0.65,
+            [1, 1, 1],
+            [end[0] - 1, end[1] - 1, end[2] - 1],
+            ore,
+        );
+        self.chance_replace_solid(ctx, 0.15, [0, 0, 0], end, ore);
+    }
+
+    /// `ZombieVillagerRoom.postProcess`: a stone cell with an iron door, beds, an anvil and a
+    /// zombie villager spawner under the floor.
+    fn write_zombie_room(&self, ctx: &mut dyn PieceContext) {
+        let [width, _, depth] = runtime::ZOMBIE_ROOM_DIMS;
+        let (xe, ze) = (width - 1, depth - 1);
+        let extra = &self.blocks.extra;
+        let air = self.blocks.air;
+        let walls = [
+            ([1, 0, 0], [5, 2, 0]),
+            ([0, 0, 1], [0, 2, 5]),
+            ([xe, 0, 1], [xe, 2, 5]),
+            ([1, 0, ze], [5, 2, ze]),
+        ];
+        for (from, to) in walls {
+            self.fill(ctx, from, to, extra.stone);
+        }
+        for (from, to) in walls {
+            self.chance_replace_non_air(ctx, 0.4, from, to, extra.cobblestone);
+        }
+        for (from, to) in walls {
+            self.chance_replace_non_air(ctx, 0.1, from, to, extra.stone_bricks);
+        }
+        // Slabs on top of the outer walls.
+        let tops = [
+            ([2, 3, 0], [4, 3, 0]),
+            ([0, 3, 2], [0, 3, 4]),
+            ([xe, 3, 2], [xe, 3, 4]),
+            ([2, 3, ze], [4, 3, ze]),
+        ];
+        for (from, to) in tops {
+            self.fill(ctx, from, to, extra.stone_slab);
+        }
+        for (from, to) in tops {
+            self.chance_fill(ctx, 0.5, from, to, extra.cobblestone_slab);
+        }
+        // The second layer, upside-down stairs round the ceiling, with inner corners.
+        let stair = |ctx: &mut dyn PieceContext, facing: &str, shape: Option<&str>| {
+            let facing = self.world_dir(facing);
+            let mut properties = vec![("half", "top"), ("facing", facing)];
+            if let Some(shape) = shape {
+                properties.push(("shape", shape));
+            }
+            self.state_of(ctx, "minecraft:cobblestone_stairs", &properties)
+        };
+        let sides = [
+            ([2, 3, 1], [4, 3, 1], "south"),
+            ([1, 3, 2], [1, 3, 4], "west"),
+            ([2, 3, 5], [4, 3, 5], "north"),
+            ([5, 3, 2], [5, 3, 4], "east"),
+        ];
+        for (from, to, facing) in sides {
+            let state = stair(ctx, facing, None);
+            self.fill(ctx, from, to, state);
+        }
+        let (left, right) = if self.mirrored() {
+            ("inner_right", "inner_left")
+        } else {
+            ("inner_left", "inner_right")
+        };
+        for (at, facing, shape) in [
+            ([1, 3, 1], "south", right),
+            ([1, 3, 5], "north", left),
+            ([5, 3, 1], "south", left),
+            ([5, 3, 5], "north", right),
+        ] {
+            let state = stair(ctx, facing, Some(shape));
+            self.set(ctx, at, state);
+        }
+        // The third layer: bottom slabs, half of them cobblestone, and a top slab in the middle.
+        self.fill(ctx, [2, 4, 2], [4, 4, 4], extra.stone_slab);
+        self.chance_fill(ctx, 0.5, [2, 4, 2], [4, 4, 4], extra.cobblestone_slab);
+        self.set(ctx, [3, 4, 3], air);
+        self.set(ctx, [3, 4, 3], extra.top_stone_slab);
+        // The floor.
+        self.fill(ctx, [1, 0, 1], [5, 0, 5], extra.stone);
+        self.chance_fill(ctx, 0.4, [1, 0, 1], [5, 0, 5], extra.cobblestone);
+        self.chance_fill(ctx, 0.1, [1, 0, 1], [5, 0, 5], extra.stone_bricks);
+        // The inside, and the door.
+        self.fill(ctx, [1, 1, 1], [5, 2, 5], air);
+        self.fill(ctx, [2, 3, 2], [4, 3, 4], air);
+        self.fill(ctx, [3, 1, 0], [3, 2, 0], air);
+        let facing = self.world_dir("north");
+        let lower = self.state_of(
+            ctx,
+            "minecraft:iron_door",
+            &[("facing", facing), ("half", "lower")],
+        );
+        let upper = self.state_of(
+            ctx,
+            "minecraft:iron_door",
+            &[("facing", facing), ("half", "upper")],
+        );
+        self.set(ctx, [3, 1, 0], lower);
+        self.set(ctx, [3, 2, 0], upper);
+        // The window, the beds, the corner torch and the button.
+        self.fill(ctx, [6, 2, 2], [6, 2, 4], extra.iron_bars);
+        let foot = self.state_of(
+            ctx,
+            "minecraft:black_bed",
+            &[("facing", facing), ("part", "foot")],
+        );
+        let head = self.state_of(
+            ctx,
+            "minecraft:black_bed",
+            &[("facing", facing), ("part", "head")],
+        );
+        for x in [1, 5] {
+            self.set(ctx, [x, 1, 4], foot);
+            self.set(ctx, [x, 1, 5], head);
+        }
+        self.set(ctx, [1, 1, 1], extra.cobblestone_wall);
+        self.set(ctx, [1, 2, 1], extra.redstone_torch);
+        let button = self.state_of(
+            ctx,
+            "minecraft:stone_button",
+            &[("face", "wall"), ("facing", self.world_dir("south"))],
+        );
+        self.set(ctx, [2, 2, 1], button);
+        self.set(ctx, [5, 1, 2], extra.anvil);
+        // A barrel of mineshaft loot, and the bench: smithing table, crafting table or blast furnace.
+        self.set(ctx, [5, 1, 1], extra.barrel);
+        let mut barrel = Compound::new();
+        barrel.insert("id".into(), Tag::String("minecraft:barrel".into()));
+        barrel.insert(
+            "LootTable".into(),
+            Tag::String("minecraft:chests/abandoned_mineshaft".into()),
+        );
+        self.block_entity_at(ctx, [5, 1, 1], barrel);
+        let bench = if self.roll(ctx) < 0.33 {
+            extra.smithing_table
+        } else if self.roll(ctx) < 0.67 {
+            self.blocks.crafting_table
+        } else {
+            extra.blast_furnace
+        };
+        self.set(ctx, [2, 1, 5], bench);
+        self.chance_fill(ctx, 0.3, [2, 3, 2], [4, 3, 4], self.blocks.cobweb);
+        // The spawner under the floor's middle.
+        self.set(ctx, [3, 0, 3], extra.spawner);
+        let mut spawner = Compound::new();
+        spawner.insert("id".into(), Tag::String("minecraft:mob_spawner".into()));
+        let mut entity = Compound::new();
+        entity.insert("id".into(), Tag::String("minecraft:zombie_villager".into()));
+        let mut data = Compound::new();
+        data.insert("entity".into(), Tag::Compound(entity));
+        spawner.insert("SpawnData".into(), Tag::Compound(data));
+        self.block_entity_at(ctx, [3, 0, 3], spawner);
+    }
+}
+
 fn right_of(facing: Facing) -> Facing {
     match facing {
         Facing::South => Facing::West,
@@ -844,6 +1212,8 @@ impl StructurePiece for Piece {
             PieceKind::Branch => self.write_branch(ctx),
             PieceKind::Stairs => self.write_stairs(ctx),
             PieceKind::Room => self.write_room(ctx),
+            PieceKind::OreDeposit => self.write_ore_deposit(ctx),
+            PieceKind::ZombieRoom => self.write_zombie_room(ctx),
         }
         Ok(())
     }
@@ -852,6 +1222,9 @@ impl StructurePiece for Piece {
         tag.insert("kind".into(), Tag::String(self.spec.kind.name().into()));
         tag.insert("facing".into(), Tag::String(self.spec.facing.name().into()));
         tag.insert("depth".into(), Tag::Int(self.spec.depth));
+        if self.spec.variant != 0 {
+            tag.insert("variant".into(), Tag::Int(self.spec.variant));
+        }
         let openings: Vec<Tag> = self
             .spec
             .openings
@@ -909,6 +1282,10 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
     // A saved depth only selects generation behaviour; clamp it like the box.
     let depth = match root.get("depth") {
         Some(Tag::Int(depth)) => (*depth).clamp(0, runtime::MAX_SAVED_SPAN),
+        _ => 0,
+    };
+    let variant = match root.get("variant") {
+        Some(Tag::Int(variant)) => (*variant).clamp(0, runtime::ORE_WEIGHTS.len() as i32 - 1),
         _ => 0,
     };
     let box_ = match root.get("BB") {
@@ -974,6 +1351,7 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
             facing,
             depth,
             openings,
+            variant,
         },
         palette,
     ))
