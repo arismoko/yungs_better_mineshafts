@@ -518,6 +518,13 @@ impl Piece {
         self.open_walls(ctx, w, d);
         self.corridor_supports(ctx, w, d);
         self.rails(ctx, w / 2, d);
+        self.carts(
+            ctx,
+            w / 2,
+            d,
+            runtime::MAIN_SHAFT_CHEST_MINECART_RATE,
+            runtime::MAIN_SHAFT_TNT_MINECART_RATE,
+        );
         self.lanterns(ctx, w, d);
         self.gravel(ctx, w, d);
         self.vines(ctx, w, d);
@@ -638,6 +645,50 @@ impl Piece {
         }
     }
 
+    /// `generateChestCarts` then `generateTntCarts`: along the tunnel's middle, a minecart now and
+    /// then on ground that is not air, inside the chunk being written.
+    fn carts(&self, ctx: &mut dyn PieceContext, x: i32, d: i32, chest_rate: f32, tnt_rate: f32) {
+        for (id, rate, loot) in [
+            ("minecraft:chest_minecart", chest_rate, true),
+            ("minecraft:tnt_minecart", tnt_rate, false),
+        ] {
+            for z in 0..=d {
+                if self.roll(ctx) >= rate {
+                    continue;
+                }
+                let local = [x, 1, z];
+                let pos = self.spec.local_to_world(local);
+                if !ctx.chunk_box().is_inside(pos) {
+                    continue;
+                }
+                let ground = self.get(ctx, [x, 0, z]);
+                if ground.is_none_or(|state| ctx.is_air(state)) {
+                    continue;
+                }
+                let seed = ctx.random().next_long();
+                let mut cart = Compound::new();
+                cart.insert("id".into(), Tag::String(id.into()));
+                cart.insert(
+                    "Pos".into(),
+                    Tag::List(
+                        [pos[0], pos[1], pos[2]]
+                            .iter()
+                            .map(|c| Tag::Double((f64::from(*c) + 0.5).to_bits()))
+                            .collect(),
+                    ),
+                );
+                if loot {
+                    cart.insert(
+                        "LootTable".into(),
+                        Tag::String("minecraft:chests/abandoned_mineshaft".into()),
+                    );
+                    cart.insert("LootTableSeed".into(), Tag::Long(seed));
+                }
+                ctx.entity(cart);
+            }
+        }
+    }
+
     fn lanterns(&self, ctx: &mut dyn PieceContext, w: i32, d: i32) {
         let mut z = 0;
         while z <= d {
@@ -746,6 +797,13 @@ impl Piece {
             self.cobwebs(ctx, [1, 3, z - 1], [w - 1, 3, z + 1]);
         }
         self.rails(ctx, w / 2, d);
+        self.carts(
+            ctx,
+            w / 2,
+            d,
+            runtime::SMALL_SHAFT_CHEST_MINECART_RATE,
+            runtime::SMALL_SHAFT_TNT_MINECART_RATE,
+        );
         self.vines(ctx, w, d);
     }
 

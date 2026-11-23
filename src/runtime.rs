@@ -38,6 +38,12 @@ pub const TORCH_SPAWN_RATE: f32 = 0.02;
 pub const WORKSTATION_SPAWN_RATE: f32 = 0.025;
 pub const SMALL_SHAFT_SPAWN_RATE: f32 = 0.07;
 pub const COBWEB_SPAWN_RATE: f32 = 0.15;
+/// `ConfigModule.SpawnRates`' minecart rates, per block along a tunnel's middle: the main corridor
+/// (`BigTunnel`) and a small shaft (`SmallTunnel`).
+pub const MAIN_SHAFT_CHEST_MINECART_RATE: f32 = 0.01;
+pub const MAIN_SHAFT_TNT_MINECART_RATE: f32 = 0.0025;
+pub const SMALL_SHAFT_CHEST_MINECART_RATE: f32 = 0.00125;
+pub const SMALL_SHAFT_TNT_MINECART_RATE: f32 = 0.0025;
 pub const SMALL_SHAFT_PIECE_CHAIN_LENGTH: i32 = 9;
 
 /// `BigTunnel.SECONDARY_AXIS_LEN`, `Y_AXIS_LEN`, `MAIN_AXIS_LEN` (secondary × height × length).
