@@ -21,5 +21,13 @@ Differences from the original:
 categories = ["worldgen", "adventure"]
 
 [[screenshots]]
-path = "page/world.png"
-caption = "A mineshaft corridor with rails and lanterns."
+path = "page/overgrown-corridor.png"
+caption = "An overgrown mineshaft corridor with rails, supports and cobwebs."
+
+[[screenshots]]
+path = "page/mesa-corridor.png"
+caption = "The mesa variant's dark oak and terracotta."
+
+[[screenshots]]
+path = "page/entrance-shaft.png"
+caption = "Looking down an entrance shaft's ladder."
