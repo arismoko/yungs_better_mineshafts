@@ -7,15 +7,15 @@ A port of [YUNG's Better Mineshafts](https://github.com/YUNG-GANG/YUNGs-Better-M
 ## What it does
 
 - Thirteen mineshaft variants by biome (oak, spruce, snowy spruce, acacia, jungle, mesa, desert, red desert, ice, mushroom, lush, dripstone, overgrown), each with its own palette.
-- A vertical entrance shaft with a ladder and doorway, wide main corridors with supports, rails, lanterns, cobwebs and gravel piles, branch corridors, stairs that climb with ascending rails, and workstation rooms.
+- A vertical entrance shaft with a ladder and doorway that opens onto the hillside through a surface tunnel (only where the ground drops away nearby), wide main corridors with supports, rails, lanterns, cobwebs and gravel piles, small tunnels with turns, stairs and four- and five-way layered intersections, workstation rooms, ore deposits and zombie villager rooms, and the spider-cave dungeons below.
 - The original's placement: its structure set, spacing and biome tags.
 - Vanilla mineshafts no longer generate, as in the original (its "Disable Vanilla Mineshafts" option is on by default).
 - Operator commands `/bettermineshafts status` and `/bettermineshafts last [chunk_x chunk_z]` describe the generator and the last mineshaft it started.
 
 ## Differences from the original
 
-- Turns and layered intersections are not built, nor is the surface tunnel above the entrance; branches are straight runs and stairs that end in an ore deposit or, rarely, a zombie villager room.
-- Biome decorations (snow, lush and dripstone growth, cactus, dead bushes, mushrooms) are not placed.
+- The four-way intersection keeps seven blocks of width where the original's box is a block off; the layout follows the original's chain otherwise.
+- Snow, cactus, dead bushes, mushrooms and moss carpet are placed as in the original. The lush and dripstone feature patches (moss patches, clay pools, dripstone clusters) are not, because a structure piece cannot run a configured feature yet.
 - The spawn rates, ore weights and height range are the original's defaults and cannot be changed.
 - The status commands are this port's own; the original has none.
 

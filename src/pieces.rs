@@ -24,8 +24,8 @@
 use std::sync::Arc;
 
 use mod_api::{
-    self, BlockMetadata, BlockState, BoundingBox, Compound, PieceContext, StructureError,
-    StructurePiece, Tag,
+    self, BlockMetadata, BlockState, BoundingBox, Compound, HeightmapType, PieceContext,
+    StructureError, StructurePiece, Tag,
 };
 
 use crate::runtime::{
@@ -341,6 +341,17 @@ pub struct Piece {
     pub blocks: Arc<Resolved>,
 }
 
+/// Where the entrance's shaft ends and where its surface tunnel runs, in the piece's frame.
+struct EntranceSite {
+    shaft_top: i32,
+    tunnel_dir: Facing,
+    tunnel_len: i32,
+    tunnel_floor: i32,
+}
+
+/// The entrance's centre column in its own frame (`VerticalEntrance`'s 24 of 0..48).
+const ENTRANCE_CENTRE: i32 = runtime::ENTRANCE_RADIUS;
+
 impl Piece {
     pub fn new(spec: PieceSpec, palette: Palette, blocks: Arc<Resolved>) -> Self {
         Self {
@@ -474,25 +485,244 @@ impl Piece {
         }
     }
 
+    /// `VerticalEntrance.postProcess`: the terrain decides everything. Nothing is built unless a
+    /// drop-off lies within 24 blocks, and then the shaft reaches up to two blocks under the
+    /// lowest ground over its 5×5 and a tunnel runs out to the open face.
     fn write_entrance(&self, ctx: &mut dyn PieceContext) {
-        let [width, height, depth] = self.spec.dims();
-        let (w, d) = (width - 1, depth - 1);
-        self.patch_shell(ctx, [width, height, depth]);
-        // Plank floor over the shaft's 3×3 interior; upstream's `replaceAirOrChains` floor.
-        self.fill(ctx, [1, 0, 1], [w - 1, 0, d - 1], self.blocks.main);
-        // Carve the climbable 3×3 core.
-        self.carve(ctx, [1, 1, 1], [w - 1, height - 2, d - 1]);
-        // Ladder on the back wall (`VerticalEntrance`: local 24 of 22..26), facing into the shaft.
-        for y in 1..=(height - 5).max(1) {
-            self.set(ctx, [2, y, 1], self.blocks.ladder(self.spec.facing));
+        let Some(site) = self.entrance_site(ctx) else {
+            return;
+        };
+        self.write_shaft(ctx, site.shaft_top);
+        self.write_surface_tunnel(ctx, &site);
+    }
+
+    /// `determineDirection`: the shaft's top and the tunnel's direction, length and floor.
+    fn entrance_site(&self, ctx: &mut dyn PieceContext) -> Option<EntranceSite> {
+        let centre = self
+            .spec
+            .local_to_world([ENTRANCE_CENTRE, 0, ENTRANCE_CENTRE]);
+        let top_y = self.spec.bounds.max[1];
+        // `SurfaceHelper.getSurfaceHeight`: the topmost non-air block, which is the heightmap
+        // value less one.
+        let surface = |ctx: &mut dyn PieceContext, x: i32, z: i32| {
+            ctx.height(HeightmapType::WorldSurfaceWg, x, z)
+                .map(|h| h - 1)
+        };
+        let mut lowest = top_y;
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                if let Some(height) = surface(ctx, centre[0] + dx, centre[2] + dz)
+                    && height > 1
+                {
+                    lowest = lowest.min(height);
+                }
+            }
         }
-        // The doorway on the front wall: stone-brick frame, slab lintel, a two-high opening.
-        self.fill(ctx, [1, 1, d], [w - 1, 2, d], self.blocks.stone_wall);
-        self.set(ctx, [2, 3, d], self.blocks.stone_slab);
-        self.carve(ctx, [2, 1, d], [2, 2, d]);
-        // One leg per corner, so the shaft does not float.
-        for (x, z) in [(0, 0), (0, d), (w, 0), (w, d)] {
+        if lowest < runtime::ENTRANCE_MIN_SURFACE || lowest == top_y {
+            return None;
+        }
+        let ceiling = lowest - 2;
+        let floor = ceiling - 4;
+        for radial in 0..3 {
+            for dir in [Facing::North, Facing::South, Facing::West, Facing::East] {
+                let step = dir.step();
+                let reach = 8 * radial + 2;
+                for i in radial * 8..radial * 8 + 8 {
+                    let offset = reach + i - radial * 8;
+                    let x = centre[0] + step[0] * offset;
+                    let z = centre[2] + step[2] * offset;
+                    if let Some(height) = surface(ctx, x, z)
+                        && height <= floor
+                        && height > 1
+                    {
+                        return Some(EntranceSite {
+                            shaft_top: ceiling - self.spec.bounds.min[1],
+                            tunnel_dir: dir,
+                            tunnel_len: i,
+                            tunnel_floor: floor - self.spec.bounds.min[1],
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The local axis (0 or 2) a world direction runs along in this piece's frame, and its sign.
+    fn local_axis(&self, dir: Facing) -> (usize, i32) {
+        let sign = dir.step()[dir.axis()];
+        if dir.axis() == self.spec.facing.axis() {
+            let flip = if matches!(self.spec.facing, Facing::South | Facing::East) {
+                1
+            } else {
+                -1
+            };
+            (2, sign * flip)
+        } else {
+            (0, sign)
+        }
+    }
+
+    /// `addVines`: the four passes, a vine on each air cell that has a full block beside it.
+    fn add_vines(&self, ctx: &mut dyn PieceContext, from: [i32; 3], to: [i32; 3]) {
+        let chance = self.palette.decorations.vine;
+        if chance <= 0.0 {
+            return;
+        }
+        for dir in [Facing::East, Facing::West, Facing::North, Facing::South] {
+            let (axis, sign) = self.local_axis(dir);
+            // The vine's face, as upstream sets it: toward the wall on x, away from it on z.
+            let face = if dir.axis() == 0 { dir } else { dir.opposite() };
+            for y in from[1]..=to[1] {
+                for x in from[0]..=to[0] {
+                    for z in from[2]..=to[2] {
+                        let at = [x, y, z];
+                        if !self.visible(ctx, at) || !self.is_air_mut(ctx, at) {
+                            continue;
+                        }
+                        let mut beside = at;
+                        beside[axis] += sign;
+                        let full = self.get(ctx, beside).is_some_and(|state| {
+                            ctx.solid_render(state) && state != self.blocks.ladder(self.spec.facing)
+                        });
+                        if full && self.roll(ctx) < chance {
+                            self.set(ctx, at, self.blocks.vine(face));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `chanceReplaceNonAir(rate, main randomizer)` over a local box.
+    fn randomize_range(&self, ctx: &mut dyn PieceContext, rate: f32, from: [i32; 3], to: [i32; 3]) {
+        for y in from[1]..=to[1] {
+            for x in from[0]..=to[0] {
+                for z in from[2]..=to[2] {
+                    let at = [x, y, z];
+                    if self.visible(ctx, at)
+                        && self.get(ctx, at).is_some_and(|s| !ctx.is_air(s))
+                        && self.roll(ctx) < rate
+                    {
+                        let state = self.pick(ctx, &self.blocks.main_random);
+                        self.set(ctx, at, state);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `generateVerticalShaft`.
+    fn write_shaft(&self, ctx: &mut dyn PieceContext, top: i32) {
+        const S: i32 = ENTRANCE_CENTRE - 2;
+        const E: i32 = ENTRANCE_CENTRE + 2;
+        self.randomize_range(ctx, self.palette.replacement_rate, [S, 0, S], [E, top, E]);
+        // Walls, floor and the ladder's backing in the main block where terrain left air.
+        for (from, to) in [
+            ([S, 0, S], [E, top, E]),
+            ([S + 1, 0, S + 1], [E - 1, 0, E - 1]),
+            ([S + 2, 1, S], [S + 2, top - 4, S]),
+        ] {
+            for y in from[1]..=to[1] {
+                for x in from[0]..=to[0] {
+                    for z in from[2]..=to[2] {
+                        self.set_if_air(ctx, [x, y, z], self.blocks.main);
+                    }
+                }
+            }
+            if from == [S, 0, S] {
+                self.carve(ctx, [S + 1, 1, S + 1], [E - 1, top - 1, E - 1]);
+            }
+        }
+        let ladder = self.blocks.ladder(self.spec.facing);
+        self.fill(ctx, [S + 2, 1, S + 1], [S + 2, top - 4, S + 1], ladder);
+        // The doorway: stone wall, a slab lintel and a two-high opening.
+        self.fill(
+            ctx,
+            [S + 1, 1, S + 4],
+            [S + 3, 2, S + 4],
+            self.blocks.stone_wall,
+        );
+        self.set(ctx, [S + 2, 3, S + 4], self.blocks.stone_slab);
+        self.carve(ctx, [S + 2, 1, S + 4], [S + 2, 2, S + 4]);
+        self.decorate_range(ctx, [S + 1, 0, S + 1], [E - 1, 1, E - 1]);
+        self.add_vines(ctx, [S + 1, 0, S + 1], [E - 1, top - 4, E - 1]);
+        for (x, z) in [(S, S), (S, E), (E, S), (E, E)] {
             self.leg(ctx, x, z);
+        }
+    }
+
+    /// `generateSurfaceTunnel`: from the shaft's side out to the open face, with supports.
+    fn write_surface_tunnel(&self, ctx: &mut dyn PieceContext, site: &EntranceSite) {
+        let (axis, sign) = self.local_axis(site.tunnel_dir);
+        let across = 2 - axis;
+        let (lo, hi) = if sign > 0 {
+            (ENTRANCE_CENTRE + 2, ENTRANCE_CENTRE + 2 + site.tunnel_len)
+        } else {
+            (ENTRANCE_CENTRE - 2 - site.tunnel_len, ENTRANCE_CENTRE - 2)
+        };
+        let floor = site.tunnel_floor;
+        let cell = |along: i32, cross: i32, y: i32| {
+            let mut at = [0; 3];
+            at[axis] = along;
+            at[across] = cross;
+            at[1] = y;
+            at
+        };
+        let (c0, c1) = (ENTRANCE_CENTRE - 2, ENTRANCE_CENTRE + 2);
+        self.randomize_range(ctx, 0.6, cell(lo, c0, floor), cell(hi, c1, floor + 4));
+        for along in lo..=hi {
+            for cross in c0 + 1..c1 {
+                self.set_if_air(ctx, cell(along, cross, floor), self.blocks.main);
+                for y in floor + 1..=floor + 3 {
+                    self.set(ctx, cell(along, cross, y), self.blocks.air);
+                }
+            }
+        }
+        self.add_vines(ctx, cell(lo, c0 + 1, floor), cell(hi, c1 - 1, floor + 4));
+        // Supports, every fourth block or so, where the centre of the floor is solid.
+        let (left, right) = (c0 + 1, c1 - 1);
+        let mut along = lo;
+        while along <= hi {
+            let roll = ctx.random().next_int_bound(4);
+            let solid = roll == 0
+                && self
+                    .get(ctx, cell(along, ENTRANCE_CENTRE, floor))
+                    .is_some_and(|s| ctx.solid_render(s));
+            if solid {
+                for cross in [left, right] {
+                    self.fill(
+                        ctx,
+                        cell(along, cross, floor + 1),
+                        cell(along, cross, floor + 2),
+                        self.blocks.support,
+                    );
+                }
+                self.fill(
+                    ctx,
+                    cell(along, left, floor + 3),
+                    cell(along, right, floor + 3),
+                    self.blocks.main,
+                );
+                self.chance_replace_non_air(
+                    ctx,
+                    0.25,
+                    cell(along, left, floor + 3),
+                    cell(along, right, floor + 3),
+                    self.blocks.support,
+                );
+                for cross in [left, right] {
+                    self.chance_replace_air(
+                        ctx,
+                        0.15,
+                        cell(along - 1, cross, floor + 3),
+                        cell(along + 1, cross, floor + 3),
+                        self.blocks.cobweb,
+                    );
+                }
+                along += 3;
+            }
+            along += 1;
         }
     }
 
@@ -543,13 +773,40 @@ impl Piece {
             let step = opening.side.step();
             let on_right_axis = step[0] == right.step()[0] && step[2] == right.step()[2];
             let x = if on_right_axis { w } else { 0 };
-            for along in opening.along..opening.along + opening.len {
+            let first = opening.along;
+            if opening.len == runtime::ROOM_DIMS[0] {
+                // `generateSideRoomOpenings`: brick over the gap, then fully open, a few columns, or shut.
+                for along in first..first + opening.len {
+                    if (0..=d).contains(&along) && self.is_air_mut(ctx, [x, 0, along]) {
+                        let state = self.pick(ctx, &self.blocks.brick_random);
+                        self.set(ctx, [x, 0, along], state);
+                    }
+                }
+                match ctx.random().next_int_bound(3) {
+                    0 => self.carve_clamped(ctx, [x, 1, first + 2], [x, 3, first + 7], d),
+                    1 => {
+                        self.carve_clamped(ctx, [x, 1, first + 2], [x, 2, first + 2], d);
+                        self.carve_clamped(ctx, [x, 1, first + 4], [x, 2, first + 5], d);
+                        self.carve_clamped(ctx, [x, 1, first + 7], [x, 2, first + 7], d);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            for along in first..first + opening.len {
                 if along < 0 || along > d {
                     continue;
                 }
-                self.carve(ctx, [x, 1, along], [x, 2, along]);
+                self.carve(ctx, [x, 1, along], [x, 3, along]);
                 self.set_if_air(ctx, [x, 0, along], self.blocks.main);
             }
+        }
+    }
+
+    fn carve_clamped(&self, ctx: &mut dyn PieceContext, from: [i32; 3], to: [i32; 3], d: i32) {
+        let (z0, z1) = (from[2].max(0), to[2].min(d));
+        if z0 <= z1 {
+            self.carve(ctx, [from[0], from[1], z0], [to[0], to[1], z1]);
         }
     }
 
@@ -886,52 +1143,55 @@ impl Piece {
     fn write_room(&self, ctx: &mut dyn PieceContext) {
         let [width, height, depth] = runtime::ROOM_DIMS;
         let (w, d) = (width - 1, depth - 1);
-        // Brick floor over the whole footprint, then a brick wall round the room.
-        for x in 0..width {
-            for z in 0..depth {
-                let state = self.pick(ctx, &self.blocks.brick_random);
-                self.set(ctx, [x, 0, z], state);
-            }
-        }
-        for y in 1..height {
+        // `SideRoom.postProcess`: two brick floor layers over the footprint, the rest of the box
+        // bricked where it is not air, then the inside carved out (open towards the tunnel at z = d).
+        for y in 0..=1 {
             for x in 0..width {
                 for z in 0..depth {
-                    let edge = x == 0 || x == w || z == 0 || z == d;
-                    if !edge {
-                        continue;
-                    }
                     let state = self.pick(ctx, &self.blocks.brick_random);
                     self.set(ctx, [x, y, z], state);
                 }
             }
         }
-        // Carve the room out, and its doorway on the side the corridor is.
-        self.carve(ctx, [1, 1, 1], [w - 1, height - 2, d - 1]);
-        self.carve(ctx, [4, 1, 0], [5, 2, 0]);
-        // Patch the ceiling only where the terrain still has a block (upstream's `ceiling` pass).
-        for x in 1..w {
-            for z in 1..d {
-                if !self.is_air_mut(ctx, [x, height - 1, z]) {
-                    let state = self.pick(ctx, &self.blocks.brick_random);
-                    self.set(ctx, [x, height - 1, z], state);
+        for y in 2..height - 1 {
+            for x in 0..width {
+                for z in 0..depth {
+                    let local = [x, y, z];
+                    if self.visible(ctx, local)
+                        && self.get(ctx, local).is_some_and(|s| !ctx.is_air(s))
+                    {
+                        let state = self.pick(ctx, &self.blocks.brick_random);
+                        self.set(ctx, local, state);
+                    }
                 }
             }
         }
-        // Iron-bar columns under a covered ceiling, never adjacent (`generateIronBarSupports`).
-        let mut previous_x = -2;
+        self.carve(ctx, [1, 1, 1], [w - 1, height - 2, d]);
+        // The ceiling is bricked where the terrain left a block, and remembered for the bars.
+        let mut ceiling = [[false; 5]; 10];
+        for x in 0..width {
+            for z in 0..depth {
+                if !self.is_air_mut(ctx, [x, height - 1, z]) {
+                    let state = self.pick(ctx, &self.blocks.brick_random);
+                    self.set(ctx, [x, height - 1, z], state);
+                    ceiling[x as usize][z as usize] = true;
+                }
+            }
+        }
+        // Iron-bar columns under a covered ceiling, never in the same x twice (`generateIronBarSupports`).
+        let mut taken: Vec<i32> = Vec::new();
         for z in 2..=3 {
-            for x in 2..=w - 2 {
-                if x <= previous_x + 1 {
-                    continue;
+            let mut x = 2;
+            while x <= 7 {
+                if !taken.contains(&x)
+                    && ceiling[x as usize][z as usize]
+                    && ctx.random().next_int_bound(5) == 0
+                {
+                    self.fill(ctx, [x, 1, z], [x, 3, z], self.blocks.iron_bars);
+                    taken.push(x);
+                    x += 1;
                 }
-                if self.is_air_mut(ctx, [x, height - 1, z]) {
-                    continue;
-                }
-                if ctx.random().next_int_bound(5) != 0 {
-                    continue;
-                }
-                self.fill(ctx, [x, 1, z], [x, 3, z], self.blocks.iron_bars);
-                previous_x = x;
+                x += 1;
             }
         }
         // Two furnaces, each fuelled with up to 32 coal in the fuel slot, then upstream's
@@ -1388,6 +1648,308 @@ impl Piece {
     }
 }
 
+/// The three small-tunnel pieces that are not a straight run, in the piece's own frame.
+impl Piece {
+    /// `addBiomeDecorations` over the piece's box but its top layer: snow, cacti, dead bushes,
+    /// mushrooms and moss carpet at the palette's chances. The lush and dripstone feature patches
+    /// (`CaveFeatures.MOSS_PATCH`, `POINTED_DRIPSTONE`) are not placed: a piece cannot run a
+    /// configured feature.
+    fn decorate(&self, ctx: &mut dyn PieceContext) {
+        let [w, h, d] = self.spec.dims();
+        self.decorate_range(ctx, [0, 0, 0], [w - 1, h - 2, d - 1]);
+    }
+
+    fn decorate_range(&self, ctx: &mut dyn PieceContext, from: [i32; 3], to: [i32; 3]) {
+        let chances = &self.palette.decorations;
+        let any = chances.snow > 0.0
+            || chances.cactus > 0.0
+            || chances.dead_bush > 0.0
+            || chances.mushroom > 0.0
+            || chances.lush;
+        if !any {
+            return;
+        }
+        let named = |ctx: &mut dyn PieceContext, name: &str| self.state_of(ctx, name, &[]);
+        let sand = [
+            named(ctx, "minecraft:sand"),
+            named(ctx, "minecraft:red_sand"),
+        ];
+        let dead_bush_ground: Vec<BlockState> = [
+            "minecraft:sand",
+            "minecraft:red_sand",
+            "minecraft:terracotta",
+            "minecraft:white_terracotta",
+            "minecraft:orange_terracotta",
+            "minecraft:yellow_terracotta",
+            "minecraft:brown_terracotta",
+            "minecraft:dirt",
+        ]
+        .iter()
+        .map(|name| named(ctx, name))
+        .collect();
+        let cactus = self.state_of(ctx, "minecraft:cactus", &[("age", "0")]);
+        let dead_bush = named(ctx, "minecraft:dead_bush");
+        let red = named(ctx, "minecraft:red_mushroom");
+        let brown = named(ctx, "minecraft:brown_mushroom");
+        let moss = named(ctx, "minecraft:moss_carpet");
+        for y in from[1]..=to[1] {
+            for x in from[0]..=to[0] {
+                for z in from[2]..=to[2] {
+                    let at = [x, y, z];
+                    if !self.visible(ctx, at) {
+                        continue;
+                    }
+                    let air = self.is_air_mut(ctx, at);
+                    let below = if y > 0 {
+                        self.get(ctx, [x, y - 1, z])
+                    } else {
+                        None
+                    };
+                    let solid_below = below.is_some_and(|s| ctx.solid_render(s));
+                    if chances.snow > 0.0 && self.roll(ctx) < chances.snow && air && solid_below {
+                        let layers = (ctx.random().next_int_bound(2) + 1).to_string();
+                        let snow = self.state_of(ctx, "minecraft:snow", &[("layers", &layers)]);
+                        self.set(ctx, at, snow);
+                    }
+                    if chances.lush && air && solid_below && below == Some(self.blocks.main) {
+                        self.set(ctx, at, moss);
+                    }
+                    if chances.cactus > 0.0 && self.roll(ctx) < chances.cactus && air {
+                        let on_sand = below.is_some_and(|s| sand.contains(&s));
+                        if on_sand {
+                            self.set(ctx, at, cactus);
+                            if self.roll(ctx) < 0.5 && self.is_air_mut(ctx, [x, y + 1, z]) {
+                                self.set(ctx, [x, y + 1, z], cactus);
+                            }
+                        }
+                    }
+                    if chances.dead_bush > 0.0
+                        && self.roll(ctx) < chances.dead_bush
+                        && air
+                        && below.is_some_and(|s| dead_bush_ground.contains(&s))
+                    {
+                        self.set(ctx, at, dead_bush);
+                    }
+                    if chances.mushroom > 0.0 && air && solid_below {
+                        let roll = self.roll(ctx);
+                        if roll < chances.mushroom / 2.0 {
+                            self.set(ctx, at, red);
+                        } else if roll < chances.mushroom {
+                            self.set(ctx, at, brown);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn rail_state(&self, ctx: &mut dyn PieceContext, shape: &str, powered: bool) -> BlockState {
+        if powered {
+            self.state_of(
+                ctx,
+                "minecraft:powered_rail",
+                &[("powered", "true"), ("shape", shape)],
+            )
+        } else {
+            self.state_of(ctx, "minecraft:rail", &[("shape", shape)])
+        }
+    }
+
+    /// The world axis shape (`north_south` or `east_west`) of a run along local z (`along_z`) or x.
+    fn axis_shape(&self, along_z: bool) -> &'static str {
+        let z_is_ns = matches!(self.world_dir("north"), "north" | "south");
+        if along_z == z_is_ns {
+            "north_south"
+        } else {
+            "east_west"
+        }
+    }
+
+    /// `ascending_<dir>` for an upstream-frame direction.
+    fn ascending(&self, java: &str) -> String {
+        format!("ascending_{}", self.world_dir(java))
+    }
+
+    /// A 50% rail on an air cell (`chanceReplaceAir` with one cell).
+    fn maybe_rail(&self, ctx: &mut dyn PieceContext, at: [i32; 3], state: BlockState) {
+        self.chance_replace_air(ctx, 0.5, at, at, state);
+    }
+
+    /// `randomize floor`: a non-air floor cell is swapped for the floor randomizer.
+    fn randomize_floor(&self, ctx: &mut dyn PieceContext, size: [i32; 3]) {
+        for x in 0..size[0] {
+            for z in 0..size[2] {
+                let local = [x, 0, z];
+                if self.visible(ctx, local)
+                    && self.get(ctx, local).is_some_and(|s| !ctx.is_air(s))
+                    && self.roll(ctx) < self.palette.replacement_rate
+                {
+                    let state = self.pick(ctx, &self.blocks.floor_random);
+                    self.set(ctx, local, state);
+                }
+            }
+        }
+    }
+
+    fn fill_air_floor(&self, ctx: &mut dyn PieceContext, from: [i32; 3], to: [i32; 3]) {
+        for x in from[0]..=to[0] {
+            for z in from[2]..=to[2] {
+                self.set_if_air(ctx, [x, from[1], z], self.blocks.main);
+            }
+        }
+    }
+
+    /// `SmallTunnelTurn.postProcess`: a five-block square where the run bends to one side.
+    fn write_turn(&self, ctx: &mut dyn PieceContext) {
+        let size = runtime::TURN_DIMS;
+        let end = size[0] - 1;
+        self.randomize_non_air(ctx, size, 1);
+        self.randomize_floor(ctx, size);
+        self.carve(ctx, [1, 1, 0], [end - 1, end - 1, end - 1]);
+        self.fill_air_floor(ctx, [1, 0, 0], [3, 0, 3]);
+        let straight = self.rail_state(ctx, self.axis_shape(true), false);
+        self.fill(ctx, [2, 1, 0], [2, 1, 1], straight);
+        // The side the turn leads to: local x = 0 when that is the piece's left (variant 0) or its right.
+        let left_is_low = right_of(self.spec.facing).opposite().step() != self.spec.facing.right();
+        let low = (self.spec.variant == 0) == left_is_low;
+        let (wall, rails, side_dir) = if low {
+            (0, [0, 1], self.world_dir_x(false))
+        } else {
+            (end, [3, 4], self.world_dir_x(true))
+        };
+        self.carve(ctx, [wall, 1, 1], [wall, end - 1, end - 1]);
+        self.fill_air_floor(ctx, [wall, 0, 1], [wall, 0, 3]);
+        let back = self.world_dir("south");
+        let curve = self.rail_state(ctx, &curve_shape(back, side_dir), false);
+        self.set(ctx, [2, 1, 2], curve);
+        let side = self.rail_state(ctx, self.axis_shape(false), false);
+        for x in rails {
+            self.set(ctx, [x, 1, 2], side);
+        }
+        for (x, z) in [(1, 1), (end - 1, 1), (1, end - 1), (end - 1, end - 1)] {
+            self.leg(ctx, x, z);
+        }
+    }
+
+    /// The world direction local x grows towards (`high`) or away from.
+    fn world_dir_x(&self, high: bool) -> &'static str {
+        let east = self.world_dir("east");
+        if high { east } else { self.world_dir("west") }
+    }
+
+    /// `LayeredIntersection4.postProcess`: a crossing whose three runs meet a loop of rail above.
+    fn write_intersection4(&self, ctx: &mut dyn PieceContext) {
+        let size = runtime::INTERSECTION4_DIMS;
+        let (xe, ye, ze) = (size[0] - 1, size[1] - 1, size[2] - 1);
+        let (main, brick) = (self.blocks.main, &self.blocks.brick_random);
+        self.randomize_non_air(ctx, size, 1);
+        self.randomize_floor(ctx, size);
+        self.carve(ctx, [2, 1, 2], [4, 1, 4]);
+        self.carve(ctx, [2, 2, 1], [4, 2, 5]);
+        self.carve(ctx, [2, 3, 0], [4, 6, 6]);
+        self.carve(ctx, [0, 3, 2], [6, 6, 4]);
+        for (x, z) in [(2, 0), (4, 0), (2, 5), (4, 5)] {
+            self.fill(ctx, [x, 2, z], [x, 3, z + 1], main);
+            let state = self.pick(ctx, brick);
+            self.chance_replace_non_air(ctx, 0.1, [x, 2, z], [x, 3, z + 1], state);
+        }
+        for at in [
+            [3, 2, 0],
+            [3, 1, 1],
+            [3, 0, 2],
+            [3, 0, 3],
+            [3, 0, 4],
+            [3, 1, 5],
+            [3, 2, 6],
+        ] {
+            self.set(ctx, at, main);
+        }
+        let south = self.rail_state(ctx, &self.ascending("south"), false);
+        let north = self.rail_state(ctx, &self.ascending("north"), false);
+        let powered = self.rail_state(ctx, self.axis_shape(true), true);
+        for at in [[3, 3, 0], [3, 2, 1], [3, 1, 2]] {
+            self.maybe_rail(ctx, at, south);
+        }
+        self.maybe_rail(ctx, [3, 1, 3], powered);
+        for at in [[3, 1, 4], [3, 2, 5], [3, 3, 6]] {
+            self.maybe_rail(ctx, at, north);
+        }
+        self.fill(ctx, [0, 3, 2], [1, 3, 4], main);
+        self.fill(ctx, [2, 4, 2], [4, 4, 4], main);
+        self.fill(ctx, [5, 3, 2], [xe, 3, 4], main);
+        let east_west = self.rail_state(ctx, self.axis_shape(false), true);
+        let plain = self.rail_state(ctx, self.axis_shape(false), false);
+        let up_east = self.rail_state(ctx, &self.ascending("east"), false);
+        let up_west = self.rail_state(ctx, &self.ascending("west"), false);
+        self.maybe_rail(ctx, [0, 4, 3], east_west);
+        self.maybe_rail(ctx, [1, 4, 3], up_east);
+        self.chance_fill(ctx, 0.5, [2, 5, 3], [4, 5, 3], plain);
+        self.maybe_rail(ctx, [5, 4, 3], up_west);
+        self.maybe_rail(ctx, [xe, 4, 3], east_west);
+        let _ = (ye, ze);
+    }
+
+    /// `LayeredIntersection5.postProcess`: two levels of crossing joined by a ladder.
+    fn write_intersection5(&self, ctx: &mut dyn PieceContext) {
+        let size = runtime::INTERSECTION5_DIMS;
+        let (xe, ye, ze) = (size[0] - 1, size[1] - 1, size[2] - 1);
+        let main = self.blocks.main;
+        self.randomize_non_air(ctx, size, 1);
+        self.randomize_floor(ctx, size);
+        self.carve(ctx, [0, 1, 0], [xe, ye - 1, ze - 1]);
+        self.carve(ctx, [0, 5, ze], [xe, ye - 1, ze]);
+        self.fill_air_floor(ctx, [0, 0, 0], [xe, 0, ze - 1]);
+        let north_south = self.rail_state(ctx, self.axis_shape(true), false);
+        let east_west = self.rail_state(ctx, self.axis_shape(false), false);
+        for at in [[2, 1, 0], [2, 1, 1]] {
+            self.maybe_rail(ctx, at, north_south);
+        }
+        for at in [[0, 1, 2], [1, 1, 2], [3, 1, 2], [4, 1, 2]] {
+            self.maybe_rail(ctx, at, east_west);
+        }
+        // The upper floor, with a hole round the ladder.
+        self.fill(ctx, [0, 5, 0], [xe, 5, ze], main);
+        for x in 0..=xe {
+            for z in 0..=ze {
+                let local = [x, 5, z];
+                if self.visible(ctx, local)
+                    && self.roll(ctx) < 0.5
+                    && self.get(ctx, local).is_some_and(|s| !ctx.is_air(s))
+                {
+                    let state = self.pick(ctx, &self.blocks.main_random);
+                    self.set(ctx, local, state);
+                }
+            }
+        }
+        self.carve(ctx, [1, 5, 1], [xe - 1, 5, ze - 1]);
+        for (x, z) in [(1, 1), (3, 1), (1, 3), (3, 3)] {
+            for y in 1..ye {
+                let state = self.pick(ctx, &self.blocks.leg_random);
+                self.set(ctx, [x, y, z], state);
+            }
+        }
+        let ladder = self.state_of(
+            ctx,
+            "minecraft:ladder",
+            &[("facing", self.world_dir("south"))],
+        );
+        self.fill(ctx, [2, 1, 3], [2, 5, 3], ladder);
+        for (x, z) in [(1, 1), (xe - 1, 1), (1, ze - 1), (xe - 1, ze - 1)] {
+            self.leg(ctx, x, z);
+        }
+    }
+}
+
+/// The curved rail joining two world directions (`north_east` and the like).
+fn curve_shape(a: &str, b: &str) -> String {
+    let (ns, ew) = if matches!(a, "north" | "south") {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    format!("{ns}_{ew}")
+}
+
 fn right_of(facing: Facing) -> Facing {
     match facing {
         Facing::South => Facing::West,
@@ -1412,6 +1974,15 @@ impl StructurePiece for Piece {
             PieceKind::OreDeposit => self.write_ore_deposit(ctx),
             PieceKind::ZombieRoom => self.write_zombie_room(ctx),
             PieceKind::SideRoomDungeon => self.write_side_room_dungeon(ctx),
+            PieceKind::Turn => self.write_turn(ctx),
+            PieceKind::Intersection4 => self.write_intersection4(ctx),
+            PieceKind::Intersection5 => self.write_intersection5(ctx),
+        }
+        if !matches!(
+            self.spec.kind,
+            PieceKind::Entrance | PieceKind::OreDeposit | PieceKind::ZombieRoom
+        ) {
+            self.decorate(ctx);
         }
         Ok(())
     }

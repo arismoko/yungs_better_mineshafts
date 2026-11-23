@@ -10,8 +10,7 @@ use std::sync::Arc;
 
 use mod_api::{
     self, BlockMetadata, Command, CommandRegistration, Compound, FoundStructure, GenerationContext,
-    HeightmapType, RandomSource, Registrar, ServerHost, StructureError, StructurePiece,
-    StructureType, Tag, Text,
+    RandomSource, Registrar, ServerHost, StructureError, StructurePiece, StructureType, Tag, Text,
 };
 
 use crate::pieces::{self, Piece};
@@ -30,7 +29,6 @@ impl StructureType for MineshaftType {
     fn find_generation_point(&self, ctx: &mut dyn GenerationContext) -> Option<FoundStructure> {
         let chunk = ctx.chunk();
         let chunk_xz = [chunk.x, chunk.z];
-        let origin = runtime::chunk_origin(chunk_xz);
         let seed = ctx.seed();
         let (world_min_y, world_max_y) = (ctx.min_y(), ctx.max_y());
 
@@ -38,7 +36,6 @@ impl StructureType for MineshaftType {
         ctx.random().next_double();
         let range = runtime::CONFIG_MAX_Y - runtime::CONFIG_MIN_Y + 1;
         let drawn = ctx.random().next_int_bound(range) + runtime::CONFIG_MIN_Y;
-        let surface = ctx.base_height(origin[0], origin[2], HeightmapType::WorldSurfaceWg);
 
         // The direction comes from the same chunk-seeded LCG upstream uses.
         let mut direction = runtime::VanillaRandom::new(0);
@@ -50,7 +47,6 @@ impl StructureType for MineshaftType {
         let request = LayoutRequest {
             chunk: chunk_xz,
             floor_y: drawn,
-            surface_y: surface,
             facing,
             world_min_y,
             world_max_y,
@@ -111,8 +107,16 @@ static KEYS: std::sync::OnceLock<std::collections::BTreeMap<&'static str, mod_ap
 /// Every block the port may place: the fixed set the piece writers name, plus every block id the
 /// thirteen carried structure configs name (all palettes, so a variant's own palette resolves).
 /// A test beside this table reads the carried files and fails if one names a block it lacks.
-pub const REQUESTED_BLOCKS: [&str; 97] = [
+pub const REQUESTED_BLOCKS: [&str; 105] = [
     "minecraft:acacia_fence",
+    "minecraft:cactus",
+    "minecraft:brown_mushroom",
+    "minecraft:dead_bush",
+    "minecraft:dirt",
+    "minecraft:moss_carpet",
+    "minecraft:red_mushroom",
+    "minecraft:snow",
+    "minecraft:terracotta",
     "minecraft:chest",
     "minecraft:furnace",
     "minecraft:anvil",

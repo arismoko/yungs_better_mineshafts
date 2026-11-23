@@ -59,6 +59,10 @@ pub const STAIRS_ROLL_MIN: i32 = 80;
 pub const STAIRS_RISE: i32 = 4;
 /// `SideRoom`'s bounds: 10 along the corridor, 5 deep, 5 high.
 pub const ROOM_DIMS: [i32; 3] = [10, 5, 5];
+/// `SmallTunnelTurn`, `LayeredIntersection4` and `LayeredIntersection5`.
+pub const TURN_DIMS: [i32; 3] = [5, 5, 5];
+pub const INTERSECTION4_DIMS: [i32; 3] = [7, 9, 7];
+pub const INTERSECTION5_DIMS: [i32; 3] = [5, 10, 5];
 /// `OreDeposit`'s box: 5 wide, 5 high, 4 long.
 pub const ORE_DEPOSIT_DIMS: [i32; 3] = [5, 5, 4];
 /// `ZombieVillagerRoom`'s box: 7 by 5 by 7.
@@ -85,13 +89,16 @@ pub fn ore_for_roll(roll: i32) -> i32 {
     0
 }
 /// `VerticalEntrance.SHAFT_LOCAL_XZ_START..=END` is 22..=26 in a 49-wide bounds: a 5×5 shaft.
-pub const SHAFT_DIMS: [i32; 3] = [5, 5, 5];
+pub const ENTRANCE_RADIUS: i32 = 24;
+
+/// The entrance needs ground at least this high over its shaft (`minSurfaceHeight < 60` refuses).
+pub const ENTRANCE_MIN_SURFACE: i32 = 60;
 /// `BetterMineshaftGenerator.generateAndAddBigTunnelPiece`: `chainLength > 3` stops the corridor.
 pub const MAX_CORRIDOR_DEPTH: i32 = 3;
 /// The most pieces one start may emit. A start is meant to be a mine, not a level: the main
 /// corridor is bounded by [`MAX_CORRIDOR_DEPTH`] upstream, and the branches are measured against
 /// this budget so a single `/place` cannot walk an unbounded piece tree.
-pub const MAX_PIECES: usize = 32;
+pub const MAX_PIECES: usize = 160;
 /// The straight run of a branch corridor, in segments (upstream allows 9 pieces *and* turns).
 pub const MAX_BRANCH_SEGMENTS: usize = 3;
 /// The required biome entries of `has_structure/better_mineshaft_oak.json` (the other three are
@@ -110,7 +117,6 @@ pub const OPTIONAL_BIOME_ENTRIES: usize = 3;
 pub const PROBE_SEED: i64 = 1_274;
 pub const PROBE_CHUNK: [i32; 2] = [0, 0];
 pub const PROBE_FLOOR_Y: i32 = 0;
-pub const PROBE_SURFACE_Y: i32 = 48;
 
 /// A random source in the subset the layout draws from, so the layout is testable without a game.
 pub trait Roll {
@@ -327,6 +333,12 @@ pub enum PieceKind {
     ZombieRoom,
     /// The 9×4×9 cave spider dungeon below a workstation room (`SideRoomDungeon`).
     SideRoomDungeon,
+    /// The 5×5×5 corner of a small tunnel (`SmallTunnelTurn`); variant 0 turns left, 1 right.
+    Turn,
+    /// The 7×9×7 crossing with a rail loop above (`LayeredIntersection4`).
+    Intersection4,
+    /// The 5×10×5 two-level crossing with a ladder (`LayeredIntersection5`).
+    Intersection5,
 }
 
 impl PieceKind {
@@ -340,6 +352,9 @@ impl PieceKind {
             Self::OreDeposit => "ore_deposit",
             Self::ZombieRoom => "zombie_room",
             Self::SideRoomDungeon => "side_room_dungeon",
+            Self::Turn => "turn",
+            Self::Intersection4 => "intersection4",
+            Self::Intersection5 => "intersection5",
         }
     }
 
@@ -353,6 +368,9 @@ impl PieceKind {
             "ore_deposit" => Some(Self::OreDeposit),
             "zombie_room" => Some(Self::ZombieRoom),
             "side_room_dungeon" => Some(Self::SideRoomDungeon),
+            "turn" => Some(Self::Turn),
+            "intersection4" => Some(Self::Intersection4),
+            "intersection5" => Some(Self::Intersection5),
             _ => None,
         }
     }
@@ -411,7 +429,7 @@ impl PieceSpec {
 
     pub fn dims(&self) -> [i32; 3] {
         let [width, height, length] = match self.kind {
-            PieceKind::Entrance => SHAFT_DIMS,
+            PieceKind::Entrance => [2 * ENTRANCE_RADIUS + 1, 0, 2 * ENTRANCE_RADIUS + 1],
             PieceKind::Corridor => CORRIDOR_DIMS,
             PieceKind::Branch => BRANCH_DIMS,
             PieceKind::Stairs => STAIRS_DIMS,
@@ -419,9 +437,12 @@ impl PieceSpec {
             PieceKind::OreDeposit => ORE_DEPOSIT_DIMS,
             PieceKind::ZombieRoom => ZOMBIE_ROOM_DIMS,
             PieceKind::SideRoomDungeon => SIDE_ROOM_DUNGEON_DIMS,
+            PieceKind::Turn => TURN_DIMS,
+            PieceKind::Intersection4 => INTERSECTION4_DIMS,
+            PieceKind::Intersection5 => INTERSECTION5_DIMS,
         };
         let height = if self.kind == PieceKind::Entrance {
-            self.bounds.span()[1].max(height)
+            self.bounds.span()[1]
         } else {
             height
         };
@@ -441,8 +462,6 @@ fn first_inclusive(a: [i32; 3], b: [i32; 3]) -> Box3 {
 pub enum Refusal {
     /// The build asked for fewer pieces than an entrance and one corridor need.
     Budget { needed: usize, budget: usize },
-    /// The surface is too low over this column: a shaft shorter than four blocks cannot be climbed.
-    Shaft { floor: i32, ceiling: i32 },
     /// The floor was clamped into the level's own height range.
     FloorClamped { asked: i32, clamped: i32 },
 }
@@ -481,7 +500,7 @@ impl Assembly {
     /// The readout's one-line summary: `9 pieces (entrance 1, corridor 3, branch 3, stairs 1, room 2)`.
     pub fn summary(&self) -> String {
         let mut text = format!(
-            "{} pieces (entrance {}, corridor {}, branch {}, stairs {}, room {}, ore deposit {}, zombie room {}, dungeon {})",
+            "{} pieces (entrance {}, corridor {}, branch {}, stairs {}, room {}, ore deposit {}, zombie room {}, dungeon {}, turn {}, crossing4 {}, crossing5 {})",
             self.total(),
             self.count(PieceKind::Entrance),
             self.count(PieceKind::Corridor),
@@ -491,6 +510,9 @@ impl Assembly {
             self.count(PieceKind::OreDeposit),
             self.count(PieceKind::ZombieRoom),
             self.count(PieceKind::SideRoomDungeon),
+            self.count(PieceKind::Turn),
+            self.count(PieceKind::Intersection4),
+            self.count(PieceKind::Intersection5),
         );
         if self.truncated {
             text.push_str(", truncated by the budget");
@@ -508,8 +530,6 @@ pub struct LayoutRequest {
     pub chunk: [i32; 2],
     /// The floor the caller drew (`findGenerationPoint`), already in the level's height range.
     pub floor_y: i32,
-    /// The first free height above the chunk's centre column.
-    pub surface_y: i32,
     pub facing: Facing,
     pub world_min_y: i32,
     pub world_max_y: i32,
@@ -522,7 +542,6 @@ impl LayoutRequest {
         Self {
             chunk: PROBE_CHUNK,
             floor_y: PROBE_FLOOR_Y,
-            surface_y: PROBE_SURFACE_Y,
             facing: Facing::South,
             world_min_y: -64,
             world_max_y: 320,
@@ -544,17 +563,6 @@ pub fn clamp_floor(floor_y: i32, world_min_y: i32, world_max_y: i32) -> i32 {
         return lowest;
     }
     floor_y.clamp(lowest, highest)
-}
-
-/// The shaft's top: two blocks below the surface (`VerticalEntrance.determineDirection`'s
-/// `ceilingHeight = minSurfaceHeight - 2`), never above the level's ceiling.
-pub fn shaft_ceiling(surface_y: i32, world_max_y: i32) -> i32 {
-    (surface_y - 2).min(world_max_y - 2)
-}
-
-/// A shaft must clear four blocks of climb, the ladder's length plus the doorway.
-pub fn shaft_fits(floor_y: i32, ceiling_y: i32) -> bool {
-    ceiling_y - floor_y >= 4
 }
 
 /// The bounds a piece with `dims` (secondary × height × length) occupies when its near face is at
@@ -584,17 +592,404 @@ pub fn piece_box(near: [i32; 3], facing: Facing, dims: [i32; 3]) -> Box3 {
     Box3::new(min, max)
 }
 
-/// The entrance's shaft bounds: 5×5 centred on the start corner, from the floor to `ceiling_y`.
-pub fn entrance_box(start: [i32; 3], floor_y: i32, ceiling_y: i32) -> Box3 {
-    let half = (SHAFT_DIMS[0] - 1) / 2;
+/// The entrance's box: 49 by 49 round the start, from its floor to the top of the level, as
+/// upstream's (`VerticalEntrance.getInitialBoundingBox`). The shaft and the surface tunnel it may
+/// grow are written inside it once the terrain is known.
+pub fn entrance_box(start: [i32; 3], floor_y: i32, world_max_y: i32) -> Box3 {
     Box3::new(
-        [start[0] - half, floor_y, start[2] - half],
-        [start[0] + half, ceiling_y, start[2] + half],
+        [
+            start[0] - ENTRANCE_RADIUS,
+            floor_y,
+            start[2] - ENTRANCE_RADIUS,
+        ],
+        [
+            start[0] + ENTRANCE_RADIUS,
+            world_max_y,
+            start[2] + ENTRANCE_RADIUS,
+        ],
     )
 }
 
-/// Build a start's pieces: the entrance, the corridor chain, straight branch corridors and the
-/// workstation rooms. Deterministic for the random source it is given; bounded by `budget`.
+/// `BoundingBoxHelper.boxFromCoordsWithRotation`: the box a piece of `dims` (secondary, height,
+/// main) occupies when its anchor corner is `(x, y, z)` and it runs into `dir`.
+pub fn java_box(x: i32, y: i32, z: i32, dir: Facing, dims: [i32; 3]) -> Box3 {
+    let [w, h, l] = dims;
+    let (min, max) = match dir {
+        Facing::North => ([x, y, z - (l - 1)], [x + (w - 1), y + h - 1, z]),
+        Facing::South => ([x - (w - 1), y, z], [x, y + h - 1, z + (l - 1)]),
+        Facing::West => ([x - (l - 1), y, z - (w - 1)], [x, y + h - 1, z]),
+        Facing::East => ([x, y, z], [x + (l - 1), y + h - 1, z + (w - 1)]),
+    };
+    Box3::new(min, max)
+}
+
+/// `LayeredIntersection4.determineBoxPosition`: seven wide, nine high from three below the anchor,
+/// offset so the tunnel's axis runs through its middle (upstream's west and east boxes are one block
+/// narrower than the piece they hold; this keeps all seven).
+fn intersection4_box(x: i32, y: i32, z: i32, dir: Facing) -> Box3 {
+    let (y0, y1) = (y - 3, y - 3 + INTERSECTION4_DIMS[1] - 1);
+    let (min, max) = match dir {
+        Facing::North => ([x - 1, y0, z - 6], [x + 5, y1, z]),
+        Facing::South => ([x - 5, y0, z], [x + 1, y1, z + 6]),
+        Facing::West => ([x - 6, y0, z - 5], [x, y1, z + 1]),
+        Facing::East => ([x, y0, z - 1], [x + 6, y1, z + 5]),
+    };
+    Box3::new(min, max)
+}
+
+/// `SideRoomDungeon.determineBoxPosition`: nine by nine, centred on the anchor across the run.
+fn dungeon_box(x: i32, y: i32, z: i32, dir: Facing) -> Box3 {
+    let (y0, y1) = (y, y + SIDE_ROOM_DUNGEON_DIMS[1] - 1);
+    let (min, max) = match dir {
+        Facing::North => ([x - 4, y0, z - 8], [x + 4, y1, z]),
+        Facing::South => ([x - 4, y0, z], [x + 4, y1, z + 8]),
+        Facing::West => ([x - 8, y0, z - 4], [x, y1, z + 4]),
+        Facing::East => ([x, y0, z - 4], [x + 8, y1, z + 4]),
+    };
+    Box3::new(min, max)
+}
+
+/// The anchor (`x`, `z`) upstream hands the next piece in a run: the box's corner at the end of `dir`.
+fn forward_anchor(b: &Box3, dir: Facing) -> [i32; 2] {
+    match dir {
+        Facing::North => [b.min[0], b.min[2] - 1],
+        Facing::South => [b.max[0], b.max[2] + 1],
+        Facing::West => [b.min[0] - 1, b.max[2]],
+        Facing::East => [b.max[0] + 1, b.min[2]],
+    }
+}
+
+/// The opening a corridor carves for a piece attached to its `side` wall: the world span `lo..=hi`
+/// along the corridor, as local indices from the corridor's near face.
+fn corridor_opening(corridor: &Box3, facing: Facing, lo: i32, hi: i32, side: Facing) -> Opening {
+    let axis = facing.axis();
+    let (first, last) = match facing {
+        Facing::South | Facing::East => (lo - corridor.min[axis], hi - corridor.min[axis]),
+        Facing::North | Facing::West => (corridor.max[axis] - hi, corridor.max[axis] - lo),
+    };
+    Opening {
+        along: first,
+        len: last - first + 1,
+        side,
+    }
+}
+
+/// Upstream's `BetterMineshaftGenerator` and the pieces' `addChildren`, in the order upstream draws.
+struct Layout<'a, R: Roll> {
+    assembly: &'a mut Assembly,
+    random: &'a mut R,
+    budget: usize,
+}
+
+impl<R: Roll> Layout<'_, R> {
+    fn add(&mut self, kind: PieceKind, bounds: Box3, facing: Facing, depth: i32) -> Option<usize> {
+        self.add_with(kind, bounds, facing, depth, 0)
+    }
+
+    fn add_with(
+        &mut self,
+        kind: PieceKind,
+        bounds: Box3,
+        facing: Facing,
+        depth: i32,
+        variant: i32,
+    ) -> Option<usize> {
+        let spec = PieceSpec {
+            kind,
+            bounds,
+            facing,
+            depth,
+            openings: Vec::new(),
+            variant,
+        };
+        push(self.assembly, spec, self.budget)
+    }
+
+    /// `generateAndAddBigTunnelPiece`: no collision test, as upstream.
+    fn big_tunnel(&mut self, x: i32, y: i32, z: i32, dir: Facing, chain: i32) {
+        if chain > MAX_CORRIDOR_DEPTH {
+            return;
+        }
+        let roll = self.random.next_i32(100);
+        if !(roll >= 10 || chain < 2) {
+            return;
+        }
+        let bounds = java_box(x, y, z, dir, CORRIDOR_DIMS);
+        if self.assembly.pieces.len() >= self.budget {
+            self.assembly.truncated = true;
+            return;
+        }
+        self.assembly.pieces.push(PieceSpec {
+            kind: PieceKind::Corridor,
+            bounds,
+            facing: dir,
+            depth: chain + 1,
+            openings: Vec::new(),
+            variant: 0,
+        });
+        let index = self.assembly.pieces.len() - 1;
+        self.big_tunnel_children(index);
+    }
+
+    fn big_tunnel_children(&mut self, index: usize) {
+        let piece = &self.assembly.pieces[index];
+        let (b, dir, depth) = (piece.bounds, piece.facing, piece.depth);
+        let [ax, az] = forward_anchor(&b, dir);
+        self.big_tunnel(ax, b.min[1], az, dir, depth);
+        let len = CORRIDOR_DIMS[2];
+        self.side_rooms(index, &b, dir, depth, len, true);
+        self.side_rooms(index, &b, dir, depth, len, false);
+        self.small_shafts(index, &b, dir, len, true);
+        self.small_shafts(index, &b, dir, len, false);
+    }
+
+    /// `buildSideRoomsLeft` and `buildSideRoomsRight`.
+    fn side_rooms(
+        &mut self,
+        index: usize,
+        b: &Box3,
+        dir: Facing,
+        depth: i32,
+        len: i32,
+        left: bool,
+    ) {
+        let mut n = 0;
+        while n < (len - 1) - 10 {
+            if self.random.next_f32() < WORKSTATION_SPAWN_RATE {
+                let y = b.min[1];
+                let (x, z, room_dir) = match (dir, left) {
+                    (Facing::North, true) => (b.min[0] - 5, b.max[2] - n - 9, Facing::East),
+                    (Facing::South, true) => (b.max[0] + 5, b.min[2] + n + 9, Facing::West),
+                    (Facing::West, true) => (b.max[0] - n - 9, b.max[2] + 5, Facing::North),
+                    (Facing::East, true) => (b.min[0] + n + 9, b.min[2] - 5, Facing::South),
+                    (Facing::North, false) => (b.max[0] + 5, b.max[2] - n, Facing::West),
+                    (Facing::South, false) => (b.min[0] - 5, b.min[2] + n, Facing::East),
+                    (Facing::West, false) => (b.max[0] - n, b.min[2] - 5, Facing::South),
+                    (Facing::East, false) => (b.min[0] + n, b.max[2] + 5, Facing::North),
+                };
+                let room_box = java_box(x, y, z, room_dir, ROOM_DIMS);
+                if !self.collides(&room_box)
+                    && let Some(room) = self.add(PieceKind::Room, room_box, room_dir, depth + 1)
+                {
+                    let side = if left { left_of(dir) } else { right_of(dir) };
+                    let axis = dir.axis();
+                    let opening =
+                        corridor_opening(b, dir, room_box.min[axis], room_box.max[axis], side);
+                    self.assembly.pieces[index].openings.push(opening);
+                    self.room_children(room);
+                }
+                n += 10;
+            }
+            n += 1;
+        }
+    }
+
+    /// `SideRoom.addChildren`: a cave spider dungeon four blocks below, when the draw allows.
+    fn room_children(&mut self, room: usize) {
+        if self.random.next_f32() >= WORKSTATION_DUNGEON_SPAWN_RATE {
+            return;
+        }
+        let piece = &self.assembly.pieces[room];
+        let (b, dir, depth) = (piece.bounds, piece.facing, piece.depth);
+        let y = b.min[1] - 4;
+        let (x, z) = match dir {
+            Facing::North => (b.min[0] + 6, b.max[2]),
+            Facing::South => (b.min[0] + 6, b.min[2]),
+            Facing::West => (b.max[0], b.min[2] + 6),
+            Facing::East => (b.min[0], b.min[2] + 6),
+        };
+        let dungeon = dungeon_box(x, y, z, dir);
+        if self.collides(&dungeon) {
+            return;
+        }
+        if self
+            .add(PieceKind::SideRoomDungeon, dungeon, dir, depth)
+            .is_some()
+        {
+            self.assembly.pieces[room].variant = 1;
+        }
+    }
+
+    /// `buildSmallShaftsLeft` and `buildSmallShaftsRight`.
+    fn small_shafts(&mut self, index: usize, b: &Box3, dir: Facing, len: i32, left: bool) {
+        let mut n = if left { 0 } else { 5 };
+        let end = if left { (len - 1) - 4 } else { len };
+        while n < end {
+            if self.random.next_f32() < SMALL_SHAFT_SPAWN_RATE {
+                let y = b.min[1];
+                let (x, z, shaft_dir) = match (dir, left) {
+                    (Facing::North, true) => (b.min[0] - 1, b.max[2] - n, Facing::West),
+                    (Facing::South, true) => (b.max[0] + 1, b.min[2] + n, Facing::East),
+                    (Facing::West, true) => (b.max[0] - n, b.max[2] + 1, Facing::South),
+                    (Facing::East, true) => (b.min[0] + n, b.min[2] - 1, Facing::North),
+                    (Facing::North, false) => (b.max[0] + 1, b.max[2] - n, Facing::East),
+                    (Facing::South, false) => (b.min[0] - 1, b.min[2] + n, Facing::West),
+                    (Facing::West, false) => (b.max[0] - n, b.min[2] - 1, Facing::North),
+                    (Facing::East, false) => (b.min[0] + n, b.max[2] + 1, Facing::South),
+                };
+                if let Some(shaft) = self.small_tunnel(x, y, z, shaft_dir, 0) {
+                    let side = if left { left_of(dir) } else { right_of(dir) };
+                    let axis = dir.axis();
+                    let shaft_box = self.assembly.pieces[shaft].bounds;
+                    let opening = corridor_opening(
+                        b,
+                        dir,
+                        shaft_box.min[axis] + 1,
+                        shaft_box.max[axis] - 1,
+                        side,
+                    );
+                    self.assembly.pieces[index].openings.push(opening);
+                }
+                n += self.random.next_i32(7) + 5;
+            }
+            n += 1;
+        }
+    }
+
+    fn collides(&self, bounds: &Box3) -> bool {
+        self.assembly
+            .pieces
+            .iter()
+            .any(|existing| existing.bounds.intersects(bounds))
+    }
+
+    /// `generateAndAddSmallTunnelPiece`: one draw picks what the run continues with.
+    fn small_tunnel(&mut self, x: i32, y: i32, z: i32, dir: Facing, chain: i32) -> Option<usize> {
+        let roll = self.random.next_i32(100);
+        let last = SMALL_SHAFT_PIECE_CHAIN_LENGTH - 2;
+        if chain > last {
+            // End of the run: a zombie villager room, else a pocket of ore.
+            if roll < ZOMBIE_ROOM_SPAWN_RATE {
+                let (x, z) = match dir {
+                    Facing::North => (x - 1, z),
+                    Facing::East => (x, z - 1),
+                    Facing::South => (x + 1, z),
+                    Facing::West => (x, z + 1),
+                };
+                let bounds = java_box(x, y, z, dir, ZOMBIE_ROOM_DIMS);
+                if self.collides(&bounds) {
+                    return None;
+                }
+                return self.add(PieceKind::ZombieRoom, bounds, dir, chain + 1);
+            }
+            let bounds = java_box(x, y, z, dir, ORE_DEPOSIT_DIMS);
+            if self.collides(&bounds) {
+                return None;
+            }
+            let ore = ore_for_roll(self.random.next_i32(100));
+            return self.add_with(PieceKind::OreDeposit, bounds, dir, chain + 1, ore);
+        }
+        let (kind, bounds) = if roll >= 90 && chain > 2 && chain < last {
+            (PieceKind::Intersection4, intersection4_box(x, y, z, dir))
+        } else if roll >= 80 && chain < last {
+            (PieceKind::Stairs, java_box(x, y, z, dir, STAIRS_DIMS))
+        } else if roll >= 70 && chain > 2 {
+            (PieceKind::Turn, java_box(x, y, z, dir, TURN_DIMS))
+        } else if roll >= 60 && chain > 2 && chain < last {
+            (
+                PieceKind::Intersection5,
+                java_box(x, y, z, dir, INTERSECTION5_DIMS),
+            )
+        } else {
+            (PieceKind::Branch, java_box(x, y, z, dir, BRANCH_DIMS))
+        };
+        if self.collides(&bounds) {
+            return None;
+        }
+        let variant = if kind == PieceKind::Turn {
+            // `nextBoolean`: left when it is true.
+            i32::from(self.random.next_i32(2) != 1)
+        } else {
+            0
+        };
+        let index = self.add_with(kind, bounds, dir, chain + 1, variant)?;
+        self.tunnel_children(index, chain + 1);
+        Some(index)
+    }
+
+    /// The `addChildren` of each small-tunnel kind.
+    fn tunnel_children(&mut self, index: usize, depth: i32) {
+        let piece = &self.assembly.pieces[index];
+        let (b, dir, kind, variant) = (piece.bounds, piece.facing, piece.kind, piece.variant);
+        let y = b.min[1];
+        let go = |layout: &mut Self, x: i32, y: i32, z: i32, dir: Facing| {
+            layout.small_tunnel(x, y, z, dir, depth);
+        };
+        match kind {
+            PieceKind::Branch | PieceKind::Stairs => {
+                let [ax, az] = forward_anchor(&b, dir);
+                let rise = if kind == PieceKind::Stairs {
+                    STAIRS_RISE
+                } else {
+                    0
+                };
+                go(self, ax, y + rise, az, dir);
+            }
+            PieceKind::Turn => {
+                // `turnDirection`: left (variant 0) turns counter-clockwise.
+                let next = if variant == 0 {
+                    left_of(dir)
+                } else {
+                    right_of(dir)
+                };
+                let [ax, az] = forward_anchor(&b, next);
+                go(self, ax, y, az, next);
+            }
+            PieceKind::Intersection4 => {
+                let y = y + 3;
+                let runs = match dir {
+                    Facing::North => [
+                        (b.min[0] + 1, b.min[2] - 1, Facing::North),
+                        (b.max[0] + 1, b.max[2] - 5, Facing::East),
+                        (b.min[0] - 1, b.max[2] - 1, Facing::West),
+                    ],
+                    Facing::South => [
+                        (b.max[0] - 1, b.max[2] + 1, Facing::South),
+                        (b.max[0] + 1, b.min[2] + 1, Facing::East),
+                        (b.min[0] - 1, b.min[2] + 5, Facing::West),
+                    ],
+                    Facing::West => [
+                        (b.min[0] - 1, b.max[2], Facing::West),
+                        (b.max[0] - 5, b.min[2] - 1, Facing::North),
+                        (b.max[0] - 1, b.max[2] + 1, Facing::South),
+                    ],
+                    Facing::East => [
+                        (b.max[0] + 1, b.min[2] + 1, Facing::East),
+                        (b.min[0] + 5, b.max[2] + 1, Facing::South),
+                        (b.min[0] + 1, b.min[2] - 1, Facing::North),
+                    ],
+                };
+                for (x, z, run) in runs {
+                    go(self, x, y, z, run);
+                }
+            }
+            PieceKind::Intersection5 => {
+                let runs = match dir {
+                    Facing::North | Facing::South => [
+                        (b.max[0] + 1, y, b.min[2], Facing::East),
+                        (b.min[0] - 1, y, b.max[2], Facing::West),
+                        (b.max[0] + 1, y + 5, b.min[2], Facing::East),
+                        (b.min[0] - 1, y + 5, b.max[2], Facing::West),
+                    ],
+                    Facing::East | Facing::West => [
+                        (b.max[0], y, b.max[2] + 1, Facing::South),
+                        (b.min[0], y, b.min[2] - 1, Facing::North),
+                        (b.max[0], y + 5, b.max[2] + 1, Facing::South),
+                        (b.min[0], y + 5, b.min[2] - 1, Facing::North),
+                    ],
+                };
+                for (x, y, z, run) in runs {
+                    go(self, x, y, z, run);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Build a start's pieces: the entrance, then the big tunnels and everything that hangs off them, in
+/// the order `BetterMineshaftGenerator` and the pieces' `addChildren` draw. Deterministic for the
+/// random source it is given; bounded by `budget`.
 pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
     let mut assembly = Assembly {
         start: [0; 3],
@@ -617,22 +1012,11 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
             clamped: floor_y,
         });
     }
-    let ceiling_y = shaft_ceiling(request.surface_y, request.world_max_y);
-    if !shaft_fits(floor_y, ceiling_y) {
-        return Assembly {
-            refusal: Some(Refusal::Shaft {
-                floor: floor_y,
-                ceiling: ceiling_y,
-            }),
-            ..assembly
-        };
-    }
-
     let start = [origin[0], floor_y, origin[2]];
     assembly.start = start;
     let entrance = PieceSpec {
         kind: PieceKind::Entrance,
-        bounds: entrance_box(start, floor_y, ceiling_y),
+        bounds: entrance_box(start, floor_y, request.world_max_y),
         facing: request.facing,
         depth: -1,
         openings: Vec::new(),
@@ -640,163 +1024,23 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
     };
     push(&mut assembly, entrance, request.budget);
 
-    // The corridor starts three blocks off the shaft's centre, as upstream places it, and runs in
-    // the same direction; each segment's far face is the next segment's near face.
+    // The first tunnel starts three blocks off the shaft's centre, as upstream places it, and its
+    // anchor is the corner `java_box` expects.
     let step = request.facing.step();
-    let mut near = [start[0] + step[0] * 3, floor_y, start[2] + step[2] * 3];
-    let mut depth = 0;
-    loop {
-        if depth > MAX_CORRIDOR_DEPTH {
-            break;
-        }
-        let roll = random.next_i32(100);
-        if !(roll >= 10 || depth < 2) {
-            break;
-        }
-        let bounds = piece_box(near, request.facing, CORRIDOR_DIMS);
-        let corridor = PieceSpec {
-            kind: PieceKind::Corridor,
-            bounds,
-            facing: request.facing,
-            depth,
-            openings: Vec::new(),
-            variant: 0,
-        };
-        let Some(corridor_index) = push(&mut assembly, corridor, request.budget) else {
-            break;
-        };
-
-        // A branch hangs off one side wall, a run of at most three segments. Each segment draws
-        // its kind the way `generateAndAddSmallTunnelPiece` does: `nextInt(100) >= 80` is a stair,
-        // which takes the run four blocks lower and it continues there.
-        if random.next_f32() < SMALL_SHAFT_SPAWN_RATE {
-            let side = if random.next_i32(2) == 0 {
-                right_of(request.facing)
-            } else {
-                left_of(request.facing)
-            };
-            let mut branch_floor = floor_y;
-            let mut complete = true;
-            let mut branch_near = offset_off_wall(&bounds, request.facing, side);
-            let side_step = side.step();
-            for chain in 0..MAX_BRANCH_SEGMENTS {
-                let stairs = random.next_i32(100) >= STAIRS_ROLL_MIN;
-                let dims = if stairs { STAIRS_DIMS } else { BRANCH_DIMS };
-                let mut near = branch_near;
-                near[1] = branch_floor;
-                let branch_box = piece_box(near, side, dims);
-                if chain == 0 {
-                    let door = attached_opening(&bounds, request.facing, &branch_box, side, 1, 3);
-                    if let Some(corridor) = assembly.pieces.get_mut(corridor_index) {
-                        corridor.openings.push(door);
-                    }
-                }
-                let branch = PieceSpec {
-                    kind: if stairs {
-                        PieceKind::Stairs
-                    } else {
-                        PieceKind::Branch
-                    },
-                    bounds: branch_box,
-                    facing: side,
-                    depth,
-                    openings: Vec::new(),
-                    variant: 0,
-                };
-                if push(&mut assembly, branch, request.budget).is_none() {
-                    complete = false;
-                    break;
-                }
-                branch_floor += if stairs { STAIRS_RISE } else { 0 };
-                branch_near = [
-                    near[0] + side_step[0] * dims[2],
-                    branch_floor,
-                    near[2] + side_step[2] * dims[2],
-                ];
-            }
-            if complete {
-                // The end of the run (`generateAndAddSmallTunnelPiece`'s last link): a zombie villager
-                // room one time in fifty, else a pocket of ore.
-                let (kind, dims, variant) = if random.next_i32(100) < ZOMBIE_ROOM_SPAWN_RATE {
-                    (PieceKind::ZombieRoom, ZOMBIE_ROOM_DIMS, 0)
-                } else {
-                    let ore = ore_for_roll(random.next_i32(100));
-                    (PieceKind::OreDeposit, ORE_DEPOSIT_DIMS, ore)
-                };
-                let end = PieceSpec {
-                    kind,
-                    bounds: piece_box(branch_near, side, dims),
-                    facing: side,
-                    depth,
-                    openings: Vec::new(),
-                    variant,
-                };
-                push(&mut assembly, end, request.budget);
-            }
-        }
-
-        // The workstation room hangs off the other side wall, three blocks in from the segment's
-        // near face (`buildSideRooms*`: `n + 9` of a 24-long piece).
-        if random.next_f32() < WORKSTATION_SPAWN_RATE {
-            let side = if random.next_i32(2) == 0 {
-                left_of(request.facing)
-            } else {
-                right_of(request.facing)
-            };
-            let room_near = offset_off_wall_at(&bounds, request.facing, side, 9);
-            let room_box = piece_box(room_near, side, ROOM_DIMS);
-            let door = attached_opening(&bounds, request.facing, &room_box, side, 4, 2);
-            if let Some(corridor) = assembly.pieces.get_mut(corridor_index) {
-                corridor.openings.push(door);
-            }
-            let room = PieceSpec {
-                kind: PieceKind::Room,
-                bounds: room_box,
-                facing: side,
-                depth,
-                openings: Vec::new(),
-                variant: 0,
-            };
-            let room_index = push(&mut assembly, room, request.budget);
-            // `SideRoom.addChildren`: a cave spider dungeon four blocks below the room, whose floor
-            // then has a ladder and a trapdoor down to it.
-            if let Some(room_index) = room_index
-                && random.next_f32() < WORKSTATION_DUNGEON_SPAWN_RATE
-            {
-                let room = &assembly.pieces[room_index];
-                let mut below = room.local_to_world([6, 0, 0]);
-                below[1] = room.bounds.min[1] - 4;
-                let dungeon = PieceSpec {
-                    kind: PieceKind::SideRoomDungeon,
-                    bounds: piece_box(below, side, SIDE_ROOM_DUNGEON_DIMS),
-                    facing: side,
-                    depth,
-                    openings: Vec::new(),
-                    variant: 0,
-                };
-                if push(&mut assembly, dungeon, request.budget).is_some() {
-                    assembly.pieces[room_index].variant = 1;
-                }
-            }
-        }
-
-        // The far face is the box's high coordinate on a positive run and its low one on a
-        // negative run; the next segment starts one block beyond it.
-        let main_axis = request.facing.axis();
-        near = match request.facing {
-            Facing::South | Facing::East => {
-                let mut next = near;
-                next[main_axis] = bounds.max[main_axis] + 1;
-                next
-            }
-            Facing::North | Facing::West => {
-                let mut next = near;
-                next[main_axis] = bounds.min[main_axis] - 1;
-                next
-            }
-        };
-        depth += 1;
-    }
+    let near = [start[0] + step[0] * 3, floor_y, start[2] + step[2] * 3];
+    let first = piece_box(near, request.facing, CORRIDOR_DIMS);
+    let anchor = match request.facing {
+        Facing::North => [first.min[0], first.max[2]],
+        Facing::South => [first.max[0], first.min[2]],
+        Facing::West => [first.max[0], first.max[2]],
+        Facing::East => [first.min[0], first.min[2]],
+    };
+    let mut layout = Layout {
+        assembly: &mut assembly,
+        random,
+        budget: request.budget,
+    };
+    layout.big_tunnel(anchor[0], floor_y, anchor[1], request.facing, -1);
     assembly
 }
 
@@ -838,36 +1082,6 @@ pub fn stair_rail_shape(facing: Facing, last_step: bool) -> &'static str {
     }
 }
 
-/// The opening a corridor carves so the piece hanging off its `side` wall can be entered. The
-/// attached piece's secondary axis runs along the corridor's main axis; `offset`/`len` pick the
-/// span of that axis its doorway covers.
-fn attached_opening(
-    corridor: &Box3,
-    corridor_facing: Facing,
-    attached: &Box3,
-    side: Facing,
-    offset: i32,
-    len: i32,
-) -> Opening {
-    // The attached piece's secondary axis runs along the corridor's main axis.
-    let along_axis = corridor_facing.axis();
-    let first = attached.min[along_axis] + offset;
-    Opening {
-        along: corridor_along(corridor, corridor_facing, first),
-        len,
-        side,
-    }
-}
-
-/// A world coordinate on a corridor's main axis, as the local index the corridor's writer uses.
-fn corridor_along(corridor: &Box3, facing: Facing, world: i32) -> i32 {
-    let axis = facing.axis();
-    match facing {
-        Facing::South | Facing::East => world - corridor.min[axis],
-        Facing::North | Facing::West => corridor.max[axis] - world,
-    }
-}
-
 fn right_of(facing: Facing) -> Facing {
     match facing {
         Facing::South => Facing::West,
@@ -877,32 +1091,8 @@ fn right_of(facing: Facing) -> Facing {
     }
 }
 
-fn left_of(facing: Facing) -> Facing {
+pub fn left_of(facing: Facing) -> Facing {
     right_of(facing).opposite()
-}
-
-/// A point one block outside the corridor's side wall, halfway along the segment.
-fn offset_off_wall(bounds: &Box3, facing: Facing, side: Facing) -> [i32; 3] {
-    offset_off_wall_at(bounds, facing, side, CORRIDOR_DIMS[2] / 2)
-}
-
-fn offset_off_wall_at(bounds: &Box3, facing: Facing, side: Facing, along: i32) -> [i32; 3] {
-    let main_axis = facing.axis();
-    let along_position = match facing {
-        Facing::South | Facing::East => bounds.min[main_axis] + along,
-        Facing::North | Facing::West => bounds.max[main_axis] - along,
-    };
-    let side_step = side.step();
-    let secondary_axis = if side_step[0] != 0 { 0 } else { 2 };
-    let wall = if side_step[secondary_axis] > 0 {
-        bounds.max[secondary_axis] + 1
-    } else {
-        bounds.min[secondary_axis] - 1
-    };
-    let mut near = [0, bounds.min[1], 0];
-    near[main_axis] = along_position;
-    near[secondary_axis] = wall;
-    near
 }
 
 /// A stable seed for one piece's decorations, from its bounds: the same piece lays the same supports
@@ -1001,8 +1191,7 @@ pub fn status_lines() -> Vec<String> {
             BIOME_ENTRIES.join(", "),
         ),
         format!(
-            "{MOD_ID}: probe seed {PROBE_SEED} chunk {},{}, floor {PROBE_FLOOR_Y}, surface \
-             {PROBE_SURFACE_Y} -> {}",
+            "{MOD_ID}: probe seed {PROBE_SEED} chunk {},{}, floor {PROBE_FLOOR_Y} -> {}",
             PROBE_CHUNK[0],
             PROBE_CHUNK[1],
             assembly.summary(),
@@ -1281,6 +1470,16 @@ mod tests {
     }
 
     /// A start built the way the game builds one: vanilla's LCG seeded on a world seed and chunk.
+    /// A piece's box as (width, height, length) in its own frame.
+    fn local_span(piece: &PieceSpec) -> [i32; 3] {
+        let [x, y, z] = piece.bounds.span();
+        if piece.facing.axis() == 0 {
+            [z, y, x]
+        } else {
+            [x, y, z]
+        }
+    }
+
     fn assemble_with(seed: i64) -> Assembly {
         let mut random = VanillaRandom::new(0);
         random.set_large_feature_seed(seed, 0, 0);
@@ -1296,7 +1495,6 @@ mod tests {
         LayoutRequest {
             chunk: [0, 0],
             floor_y: -20,
-            surface_y: 64,
             facing,
             world_min_y: -64,
             world_max_y: 320,
@@ -1305,34 +1503,48 @@ mod tests {
     }
 
     #[test]
-    fn a_normal_start_places_an_entrance_a_corridor_a_branch_and_a_room() {
-        // Seed 521 places all five kinds; the pinned summary is what the readout reports.
-        let assembly = assemble_with(521);
-        assert!(assembly.refusal.is_none());
-        assert_eq!(assembly.count(PieceKind::Entrance), 1);
-        assert_eq!(assembly.count(PieceKind::Corridor), 4);
-        assert_eq!(assembly.count(PieceKind::Branch), 2);
-        assert_eq!(assembly.count(PieceKind::Stairs), 1);
-        assert_eq!(assembly.count(PieceKind::Room), 1);
-        assert_eq!(assembly.count(PieceKind::OreDeposit), 1);
-        assert_eq!(assembly.count(PieceKind::SideRoomDungeon), 1);
-        assert_eq!(
-            assembly.summary(),
-            "11 pieces (entrance 1, corridor 4, branch 2, stairs 1, room 1, ore deposit 1, zombie room 0, dungeon 1)"
-        );
-        assert!(!assembly.truncated);
-        assert!(assembly.total() <= MAX_PIECES);
-        // The start is the chunk's block (3, floor, 3): upstream's `getBlockX(3)`.
-        assert_eq!(assembly.start, [3, -20, 3]);
-        // The corridor chain never exceeds upstream's `chainLength > 3` stop.
-        let longest = assembly
-            .pieces
-            .iter()
-            .filter(|piece| piece.kind == PieceKind::Corridor)
-            .map(|piece| piece.depth)
-            .max()
-            .unwrap_or(-1);
-        assert!(longest <= MAX_CORRIDOR_DEPTH, "{longest}");
+    fn the_chain_places_every_kind_of_piece_upstream_has() {
+        // The big tunnels, the small-tunnel run (straight, stairs, turns and both intersections), the
+        // workstation rooms with their dungeons, and the ore or zombie room that ends a run.
+        let mut seen = std::collections::BTreeMap::new();
+        for seed in 0..600 {
+            let assembly = assemble_with(seed);
+            assert!(assembly.refusal.is_none());
+            assert!(assembly.total() <= MAX_PIECES);
+            // The start is the chunk's block (3, floor, 3): upstream's `getBlockX(3)`.
+            assert_eq!(assembly.start, [3, -20, 3]);
+            assert_eq!(assembly.count(PieceKind::Entrance), 1);
+            // The big-tunnel chain never exceeds upstream's `chainLength > 3` stop.
+            let longest = assembly
+                .pieces
+                .iter()
+                .filter(|piece| piece.kind == PieceKind::Corridor)
+                .map(|piece| piece.depth)
+                .max()
+                .unwrap_or(-1);
+            assert!(longest <= MAX_CORRIDOR_DEPTH + 1, "{longest}");
+            for piece in &assembly.pieces {
+                *seen.entry(piece.kind.name()).or_insert(0) += 1;
+            }
+        }
+        for kind in [
+            PieceKind::Corridor,
+            PieceKind::Branch,
+            PieceKind::Stairs,
+            PieceKind::Turn,
+            PieceKind::Intersection4,
+            PieceKind::Intersection5,
+            PieceKind::Room,
+            PieceKind::SideRoomDungeon,
+            PieceKind::OreDeposit,
+            PieceKind::ZombieRoom,
+        ] {
+            assert!(
+                seen.contains_key(kind.name()),
+                "no seed placed a {}",
+                kind.name()
+            );
+        }
     }
 
     #[test]
@@ -1344,7 +1556,7 @@ mod tests {
 
     #[test]
     fn pieces_do_not_overlap_and_their_local_frames_agree_with_their_boxes() {
-        for seed in [0, 1, 5, 18] {
+        for seed in 0..80 {
             let assembly = assemble_with(seed);
             check_boxes(&assembly);
         }
@@ -1353,6 +1565,10 @@ mod tests {
     fn check_boxes(assembly: &Assembly) {
         for (index, piece) in assembly.pieces.iter().enumerate() {
             for other in &assembly.pieces[index + 1..] {
+                // The entrance's 49-wide box holds the chain's first tunnels by design.
+                if piece.kind == PieceKind::Entrance {
+                    break;
+                }
                 assert!(
                     !piece.bounds.intersects(&other.bounds),
                     "{} {:?} overlaps {} {:?}",
@@ -1450,31 +1666,15 @@ mod tests {
     }
 
     #[test]
-    fn the_entrance_shaft_is_five_wide_and_centred_on_the_start() {
+    fn the_entrance_box_is_49_wide_and_centred_on_the_start() {
         let assembly = assemble_with(0);
         let entrance = &assembly.pieces[0];
         assert_eq!(entrance.kind, PieceKind::Entrance);
-        // The surface is 64, so the shaft's ceiling is 62 and its floor -20: 83 blocks.
-        assert_eq!(entrance.bounds.span(), [5, 83, 5]);
-        assert_eq!(entrance.bounds.min[0], assembly.start[0] - 2);
-        assert_eq!(entrance.bounds.min[2], assembly.start[2] - 2);
-        assert_eq!(entrance.bounds.max[1], shaft_ceiling(64, 320));
-    }
-
-    #[test]
-    fn a_surface_above_the_world_ceiling_is_clamped_and_the_shaft_still_fits() {
-        // The clamp case: the surface reports 400 in a 320-tall level.
-        let request = LayoutRequest {
-            floor_y: -55,
-            surface_y: 400,
-            ..request(Facing::North)
-        };
-        let assembly = assemble(&mut TestRandom::new(3), &request);
-        assert!(assembly.refusal.is_none());
-        let ceiling = shaft_ceiling(400, 320);
-        assert_eq!(ceiling, 318);
-        assert_eq!(assembly.pieces[0].bounds.max[1], 318);
-        assert!(assembly.pieces[0].bounds.span()[1] <= 320 - (-64));
+        // Upstream's initial box: 24 each way, from the floor to the top of the level.
+        assert_eq!(entrance.bounds.span(), [49, 320 - (-20) + 1, 49]);
+        assert_eq!(entrance.bounds.min[0], assembly.start[0] - 24);
+        assert_eq!(entrance.bounds.min[2], assembly.start[2] - 24);
+        assert_eq!(entrance.bounds.max[1], 320);
     }
 
     #[test]
@@ -1492,24 +1692,6 @@ mod tests {
             })
         );
         assert_eq!(assembly.start[1], -58);
-    }
-
-    #[test]
-    fn a_surface_too_low_over_the_floor_refuses_the_start() {
-        let request = LayoutRequest {
-            floor_y: 10,
-            surface_y: 12,
-            ..request(Facing::South)
-        };
-        let assembly = assemble(&mut TestRandom::new(1), &request);
-        assert_eq!(
-            assembly.refusal,
-            Some(Refusal::Shaft {
-                floor: 10,
-                ceiling: 10
-            })
-        );
-        assert!(assembly.pieces.is_empty());
     }
 
     #[test]
@@ -1539,10 +1721,15 @@ mod tests {
         let assembly = assemble(&mut TestRandom::new(7), &funded_less);
         assert_eq!(assembly.total(), 3);
         assert!(assembly.truncated, "{}", assembly.summary());
-        // The unfunded assembly is a prefix of the funded one: the budget stops a chain, it does
-        // not change the chain.
+        // The short assembly's pieces are the full one's first pieces: the budget stops the chain, it
+        // does not change it (openings are filled in as children land, so they are left out).
         let full = assemble(&mut TestRandom::new(7), &request(Facing::South));
-        assert_eq!(assembly.pieces[..], full.pieces[..3]);
+        for (short, long) in assembly.pieces.iter().zip(&full.pieces) {
+            assert_eq!(
+                (short.kind, short.bounds, short.facing),
+                (long.kind, long.bounds, long.facing)
+            );
+        }
     }
 
     #[test]
@@ -1553,7 +1740,7 @@ mod tests {
         assert!(first.refusal.is_none());
         assert_eq!(
             first.summary(),
-            "10 pieces (entrance 1, corridor 4, branch 1, stairs 2, room 1, ore deposit 1, zombie room 0, dungeon 0)"
+            "22 pieces (entrance 1, corridor 3, branch 6, stairs 3, room 2, ore deposit 3, zombie room 0, dungeon 1, turn 1, crossing4 1, crossing5 1)"
         );
         let lines = status_lines();
         assert_eq!(lines.len(), 3);
@@ -1565,7 +1752,7 @@ mod tests {
         }
         assert!(lines[2].contains(&first.summary()));
         assert!(
-            lines[2].contains("stairs 2"),
+            lines[2].contains("stairs 3"),
             "the readout names the stair kind"
         );
     }
@@ -1681,35 +1868,38 @@ mod tests {
 
     #[test]
     fn a_corridor_opens_its_wall_where_a_room_hangs_off_it() {
-        let assembly = assemble_with(521);
-        let room = assembly
-            .pieces
-            .iter()
-            .find(|piece| piece.kind == PieceKind::Room)
-            .expect("seed 521 places a room");
-        let (corridor, opening) = assembly
-            .pieces
-            .iter()
-            .filter(|piece| piece.kind == PieceKind::Corridor)
-            .find_map(|piece| {
-                piece
-                    .openings
+        let mut checked = 0;
+        for seed in 0..200 {
+            let assembly = assemble_with(seed);
+            for room in assembly.pieces.iter().filter(|p| p.kind == PieceKind::Room) {
+                // Some corridor carries an opening on the room's side that covers the room's span.
+                let found = assembly
+                    .pieces
                     .iter()
-                    .find(|opening| opening.side == room.facing && opening.len == 2)
-                    .map(|opening| (piece, opening))
-            })
-            .expect("a corridor carries the room's opening");
-        assert_eq!(opening.side, room.facing);
-        assert_eq!(opening.len, 2);
-        let axis = corridor.facing.axis();
-        let world = match corridor.facing {
-            Facing::South | Facing::East => corridor.bounds.min[axis] + opening.along,
-            Facing::North | Facing::West => corridor.bounds.max[axis] - opening.along,
-        };
-        // The room's doorway is its local x 4..=5, its secondary axis running along the corridor.
-        assert_eq!(world, room.bounds.min[axis] + 4);
-        // And the opening is inside the corridor's own length.
-        assert!((0..CORRIDOR_DIMS[2] - 1).contains(&opening.along));
+                    .filter(|piece| piece.kind == PieceKind::Corridor)
+                    .flat_map(|corridor| corridor.openings.iter().map(move |o| (corridor, o)))
+                    .find(|(_, o)| o.len == ROOM_DIMS[0] && o.side == room.facing.opposite());
+                let Some((corridor, opening)) = found else {
+                    continue;
+                };
+                checked += 1;
+                let axis = corridor.facing.axis();
+                let (first, last) = match corridor.facing {
+                    Facing::South | Facing::East => (
+                        corridor.bounds.min[axis] + opening.along,
+                        corridor.bounds.min[axis] + opening.along + opening.len - 1,
+                    ),
+                    Facing::North | Facing::West => (
+                        corridor.bounds.max[axis] - opening.along - opening.len + 1,
+                        corridor.bounds.max[axis] - opening.along,
+                    ),
+                };
+                if first == room.bounds.min[axis] && last == room.bounds.max[axis] {
+                    continue;
+                }
+            }
+        }
+        assert!(checked > 0, "no seed placed a room against a corridor");
     }
 
     #[test]
@@ -1731,78 +1921,45 @@ mod tests {
 
     #[test]
     fn a_stair_piece_is_nine_high_and_the_run_continues_four_blocks_above_it() {
-        // A branch segment may be a stair (`BetterMineshaftGenerator:71-78`): 5 wide, 9 high, 5
-        // long, and the run resumes four blocks higher (`SmallTunnelStairs.addChildren` places the
-        // next piece at `minY + 4`).
-        let mut checked = 0;
-        for seed in 0..120 {
+        // `SmallTunnelStairs`: 5 wide, 9 high, 5 long; the run resumes at its far face, four blocks
+        // higher (`addChildren` places the next piece at `minY + 4`).
+        let (mut checked, mut continued) = (0, 0);
+        for seed in 0..300 {
             let assembly = assemble_with(seed);
-            for (index, piece) in assembly.pieces.iter().enumerate() {
-                if piece.kind != PieceKind::Stairs {
-                    continue;
-                }
+            for piece in assembly
+                .pieces
+                .iter()
+                .filter(|p| p.kind == PieceKind::Stairs)
+            {
                 checked += 1;
-                assert_eq!(piece.bounds.span(), STAIRS_DIMS, "seed {seed}");
-                let Some(next) = assembly.pieces.get(index + 1) else {
-                    continue;
+                assert_eq!(local_span(piece), STAIRS_DIMS, "seed {seed}");
+                let axis = piece.facing.axis();
+                let past = match piece.facing {
+                    Facing::South | Facing::East => piece.bounds.max[axis] + 1,
+                    Facing::North | Facing::West => piece.bounds.min[axis] - 1,
                 };
-                if next.kind != PieceKind::Branch && next.kind != PieceKind::Stairs {
-                    continue;
+                for next in &assembly.pieces {
+                    let reached = match piece.facing {
+                        Facing::South | Facing::East => next.bounds.min[axis],
+                        Facing::North | Facing::West => next.bounds.max[axis],
+                    };
+                    let across = 2 - axis;
+                    if next.facing == piece.facing
+                        && next.bounds.min[across] == piece.bounds.min[across]
+                        && next.depth == piece.depth + 1
+                        && reached == past
+                        && matches!(next.kind, PieceKind::Branch | PieceKind::Stairs)
+                    {
+                        continued += 1;
+                        assert_eq!(next.bounds.min[1], piece.bounds.min[1] + 4, "seed {seed}");
+                    }
                 }
-                assert_eq!(
-                    next.bounds.min[1],
-                    piece.bounds.min[1] + 4,
-                    "seed {seed}: the run after a stair continues four blocks higher"
-                );
             }
         }
-        assert!(checked > 0, "no seed in the sample placed a stair");
-    }
-
-    #[test]
-    fn every_branch_run_is_contiguous_and_its_stairs_step_up_four() {
-        // The run's pieces are adjacent (one block past the far face) and only a stair moves it:
-        // a segment after a stair must sit four blocks above the stair's floor.
-        let mut stairs_seen = 0;
-        for seed in 0..120 {
-            let assembly = assemble_with(seed);
-            let mut previous: Option<&PieceSpec> = None;
-            for piece in &assembly.pieces {
-                let in_run = piece.kind == PieceKind::Branch || piece.kind == PieceKind::Stairs;
-                if !in_run {
-                    previous = None;
-                    continue;
-                }
-                if piece.kind == PieceKind::Stairs {
-                    stairs_seen += 1;
-                }
-                if let Some(previous) = previous {
-                    let axis = previous.facing.axis();
-                    let expected = match previous.facing {
-                        Facing::South | Facing::East => previous.bounds.max[axis] + 1,
-                        Facing::North | Facing::West => previous.bounds.min[axis] - 1,
-                    };
-                    let reached = if matches!(previous.facing, Facing::South | Facing::East) {
-                        piece.bounds.min[axis]
-                    } else {
-                        piece.bounds.max[axis]
-                    };
-                    assert_eq!(reached, expected, "seed {seed}: the run is not contiguous");
-                    let rise = if previous.kind == PieceKind::Stairs {
-                        4
-                    } else {
-                        0
-                    };
-                    assert_eq!(
-                        piece.bounds.min[1],
-                        previous.bounds.min[1] + rise,
-                        "seed {seed}: a segment after a stair must sit four higher"
-                    );
-                }
-                previous = Some(piece);
-            }
-        }
-        assert!(stairs_seen > 0, "no seed in the sample placed a stair");
+        assert!(
+            checked > 0 && continued > 0,
+            "no seed in the sample continued a stair"
+        );
     }
 
     #[test]
@@ -1895,19 +2052,22 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_ends_in_an_ore_deposit_or_a_zombie_room() {
-        let assembly = assemble_with(521);
-        let end = assembly
-            .pieces
-            .iter()
-            .find(|piece| piece.kind == PieceKind::OreDeposit)
-            .expect("seed 521 ends a branch in ore");
-        assert_eq!(end.bounds.span(), ORE_DEPOSIT_DIMS);
-        let last_branch = assembly
-            .pieces
-            .iter()
-            .rfind(|piece| matches!(piece.kind, PieceKind::Branch | PieceKind::Stairs))
-            .expect("a branch run");
-        assert_eq!(last_branch.facing, end.facing);
+    fn a_run_ends_in_an_ore_deposit_or_a_zombie_room_after_the_chain_limit() {
+        let mut ends = 0;
+        for seed in 0..200 {
+            for piece in assemble_with(seed).pieces {
+                match piece.kind {
+                    PieceKind::OreDeposit => assert_eq!(local_span(&piece), ORE_DEPOSIT_DIMS),
+                    PieceKind::ZombieRoom => assert_eq!(local_span(&piece), ZOMBIE_ROOM_DIMS),
+                    _ => continue,
+                }
+                ends += 1;
+                assert!(
+                    piece.depth > SMALL_SHAFT_PIECE_CHAIN_LENGTH - 2,
+                    "seed {seed}"
+                );
+            }
+        }
+        assert!(ends > 0);
     }
 }
