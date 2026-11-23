@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use mod_api::{
-    self, BlockMetadata, Command, Compound, Flow, FoundStructure, GenerationContext, HeightmapType,
-    Registrar, RunModCommandEvent, ServerHost, StructureError, StructurePiece, StructureRandom,
+    self, BlockMetadata, Command, CommandRegistration, Compound, FoundStructure, GenerationContext,
+    HeightmapType, RandomSource, Registrar, ServerHost, StructureError, StructurePiece,
     StructureType, Tag, Text,
 };
 
@@ -92,7 +92,7 @@ impl StructureType for MineshaftType {
 }
 
 /// The game's piece random as the layout's [`Roll`].
-struct EngineRoll<'a>(&'a mut dyn StructureRandom);
+struct EngineRoll<'a>(&'a mut dyn RandomSource);
 
 impl Roll for EngineRoll<'_> {
     fn next_i32(&mut self, bound: i32) -> i32 {
@@ -277,40 +277,39 @@ pub fn last_lines(chunk: Option<[i32; 2]>) -> Vec<String> {
     lines
 }
 
-/// The commands, each usage on its own.
-pub fn declare_commands(commands: &mut Vec<Command>) {
-    for usage in [
-        "bettermineshafts",
-        "bettermineshafts status",
-        "bettermineshafts last",
-        "bettermineshafts last [chunk_x:integer] [chunk_z:integer]",
-    ] {
-        commands.push(Command::new(usage));
+/// The operator commands (level 2, as vanilla's debug commands): `/bettermineshafts [status]` and `/bettermineshafts last [chunk_x chunk_z]`.
+pub fn declare_commands(commands: &mut Vec<CommandRegistration>) {
+    for usage in ["bettermineshafts", "bettermineshafts status"] {
+        commands.push(
+            Command::op(usage, 2)
+                .executes(|host, _source, _invocation| Ok(send(host, runtime::status_lines()))),
+        );
     }
+    commands.push(
+        Command::op(
+            "bettermineshafts last [chunk_x:integer] [chunk_z:integer]",
+            2,
+        )
+        .executes(|host, _source, invocation| {
+            let coordinate = |name| match invocation.argument(name) {
+                Some(mod_api::CommandArgumentValue::Integer(value)) => Some(*value),
+                _ => None,
+            };
+            let chunk = coordinate("chunk_x")
+                .zip(coordinate("chunk_z"))
+                .map(|(x, z)| [x, z]);
+            Ok(send(host, last_lines(chunk)))
+        }),
+    );
 }
 
-/// Answer `/bettermineshafts [status|last]` and take it; `Flow::Continue` for another mod's line.
-pub fn run_command(host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
-    let path: Vec<&str> = event.command.literals.iter().map(String::as_str).collect();
-    let lines = match path.as_slice() {
-        ["bettermineshafts"] | ["bettermineshafts", "status"] => runtime::status_lines(),
-        ["bettermineshafts", "last"] => {
-            let mut chunk = [0; 2];
-            let mut given = 0;
-            for argument in &event.command.arguments {
-                if let mod_api::CommandArgumentValue::Integer(value) = &argument.value {
-                    chunk[given] = *value;
-                    given += 1;
-                }
-            }
-            last_lines((given == 2).then_some(chunk))
-        }
-        _ => return Flow::Continue,
-    };
+/// Send `lines` to the command's source; the command's result is their count.
+fn send(host: &mut dyn ServerHost, lines: Vec<String>) -> i32 {
+    let count = lines.len() as i32;
     for line in lines {
         let _ = host.commands().feedback(Text::literal(line));
     }
-    Flow::Cancel
+    count
 }
 
 /// A structure's palette from the NBT its definition carries: every field the config states

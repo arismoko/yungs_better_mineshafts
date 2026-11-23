@@ -91,7 +91,7 @@ pub trait Roll {
 
 /// Vanilla's worldgen LCG (`LegacyRandomSource`/`WorldgenRandom`): the same seed and chunk give the
 /// same assembly, which is what the readout and its tests rely on. In the game the layout draws
-/// from the engine's `StructureRandom` instead; this type exists for the probe.
+/// from the engine's `RandomSource` instead; this type exists for the probe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VanillaRandom {
     seed: i64,
