@@ -6,17 +6,18 @@
 //! shape and `Name` in the 1.21.1 one), and a field the reader cannot see keeps the oak default
 //! rather than failing the whole structure.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use mod_api::{
     self, BlockMetadata, Command, CommandRegistration, Compound, FoundStructure, GenerationContext,
-    RandomSource, Registrar, ServerHost, StructureError, StructurePiece, StructureType, Tag, Text,
+    Host, RandomSource, Registrar, ServerHost, SettingSpec, StructureError, StructurePiece,
+    StructureType, Tag, Text,
 };
 
 use crate::pieces::{self, Piece};
 use crate::runtime::{
     self, BlockRef, DecorationChances, LayoutRequest, LegVariant, Palette, Randomizer, Roll,
-    Weighted,
+    Settings, Weighted,
 };
 
 /// The type the jar's data-pack structures name: `"type": "bettermineshafts:mineshaft"`.
@@ -33,9 +34,14 @@ impl StructureType for MineshaftType {
         let (world_min_y, world_max_y) = (ctx.min_y(), ctx.max_y());
 
         // Upstream's first draw, then the floor inside the config's range (`-55..=30`).
+        let settings = settings();
         ctx.random().next_double();
-        let range = runtime::CONFIG_MAX_Y - runtime::CONFIG_MIN_Y + 1;
-        let drawn = ctx.random().next_int_bound(range) + runtime::CONFIG_MIN_Y;
+        let range = settings.max_y - settings.min_y + 1;
+        if range < 1 {
+            // `nextInt` refuses a bound below one: the original throws, so no mineshaft starts.
+            return None;
+        }
+        let drawn = ctx.random().next_int_bound(range) + settings.min_y;
 
         // The direction comes from the same chunk-seeded LCG upstream uses.
         let mut direction = runtime::VanillaRandom::new(0);
@@ -51,6 +57,7 @@ impl StructureType for MineshaftType {
             world_min_y,
             world_max_y,
             budget: runtime::MAX_PIECES,
+            settings,
         };
         let assembly = {
             let mut random = EngineRoll(ctx.random());
@@ -65,8 +72,12 @@ impl StructureType for MineshaftType {
             .pieces
             .iter()
             .map(|spec| {
-                Arc::new(Piece::new(spec.clone(), palette.clone(), blocks.clone()))
-                    as Arc<dyn StructurePiece>
+                Arc::new(Piece::new(
+                    spec.clone(),
+                    palette.clone(),
+                    blocks.clone(),
+                    settings,
+                )) as Arc<dyn StructurePiece>
             })
             .collect();
         Some(FoundStructure {
@@ -83,7 +94,7 @@ impl StructureType for MineshaftType {
     ) -> Result<Arc<dyn StructurePiece>, StructureError> {
         let (spec, palette) = pieces::piece_from_tag(tag)?;
         let blocks = Arc::new(pieces::resolve(metadata, &palette)?);
-        Ok(Arc::new(Piece::new(spec, palette, blocks)))
+        Ok(Arc::new(Piece::new(spec, palette, blocks, settings())))
     }
 }
 
@@ -107,7 +118,8 @@ static KEYS: std::sync::OnceLock<std::collections::BTreeMap<&'static str, mod_ap
 /// Every block the port may place: the fixed set the piece writers name, plus every block id the
 /// thirteen carried structure configs name (all palettes, so a variant's own palette resolves).
 /// A test beside this table reads the carried files and fails if one names a block it lacks.
-pub const REQUESTED_BLOCKS: [&str; 105] = [
+pub const REQUESTED_BLOCKS: [&str; 106] = [
+    "minecraft:wall_torch",
     "minecraft:acacia_fence",
     "minecraft:cactus",
     "minecraft:brown_mushroom",
@@ -220,9 +232,156 @@ pub fn key_for(name: &str) -> Option<mod_api::BlockKey> {
     KEYS.get()?.get(name).copied()
 }
 
-/// Register the type once, at startup: request the palette's block keys first, then the structure
+/// The settings the server that runs now started with; the original's defaults until one starts.
+/// Worldgen workers read it, and only [`read_settings`] writes it.
+static SETTINGS: RwLock<Settings> = RwLock::new(Settings::DEFAULT);
+
+/// A setting: its key, and where its value lives in [`Settings`].
+enum Field {
+    Int(fn(&mut Settings) -> &mut i32, f64, f64),
+    Rate(fn(&mut Settings) -> &mut f64),
+    Toggle(fn(&mut Settings) -> &mut bool),
+}
+
+/// Every `ConfigModule` value this code reads, with its key and, for a number, the original's
+/// `defineInRange` bounds. The two heights have no range in the original; the sliders span the
+/// overworld's build height.
+const FIELDS: [(&str, Field); 23] = [
+    ("min_y", Field::Int(|s| &mut s.min_y, -64.0, 319.0)),
+    ("max_y", Field::Int(|s| &mut s.max_y, -64.0, 319.0)),
+    ("lantern_rate", Field::Rate(|s| &mut s.lantern_rate)),
+    ("torch_rate", Field::Rate(|s| &mut s.torch_rate)),
+    ("workstation_rate", Field::Rate(|s| &mut s.workstation_rate)),
+    (
+        "workstation_cellar_rate",
+        Field::Rate(|s| &mut s.workstation_cellar_rate),
+    ),
+    ("small_shaft_rate", Field::Rate(|s| &mut s.small_shaft_rate)),
+    ("cobweb_rate", Field::Rate(|s| &mut s.cobweb_rate)),
+    (
+        "small_shaft_chest_minecart_rate",
+        Field::Rate(|s| &mut s.small_shaft_chest_minecart_rate),
+    ),
+    (
+        "small_shaft_tnt_minecart_rate",
+        Field::Rate(|s| &mut s.small_shaft_tnt_minecart_rate),
+    ),
+    (
+        "main_shaft_chest_minecart_rate",
+        Field::Rate(|s| &mut s.main_shaft_chest_minecart_rate),
+    ),
+    (
+        "main_shaft_tnt_minecart_rate",
+        Field::Rate(|s| &mut s.main_shaft_tnt_minecart_rate),
+    ),
+    (
+        "outpost_chance",
+        Field::Int(|s| &mut s.zombie_room_rate, 0.0, 100.0),
+    ),
+    (
+        "small_shaft_length",
+        Field::Int(|s| &mut s.small_shaft_chain_length, 0.0, 1000.0),
+    ),
+    ("ore_deposits", Field::Toggle(|s| &mut s.ore_deposits)),
+    (
+        "cobble_chance",
+        Field::Int(|s| &mut s.ore_weights[0], 0.0, 100.0),
+    ),
+    (
+        "coal_chance",
+        Field::Int(|s| &mut s.ore_weights[1], 0.0, 100.0),
+    ),
+    (
+        "iron_chance",
+        Field::Int(|s| &mut s.ore_weights[2], 0.0, 100.0),
+    ),
+    (
+        "redstone_chance",
+        Field::Int(|s| &mut s.ore_weights[3], 0.0, 100.0),
+    ),
+    (
+        "gold_chance",
+        Field::Int(|s| &mut s.ore_weights[4], 0.0, 100.0),
+    ),
+    (
+        "lapis_chance",
+        Field::Int(|s| &mut s.ore_weights[5], 0.0, 100.0),
+    ),
+    (
+        "emerald_chance",
+        Field::Int(|s| &mut s.ore_weights[6], 0.0, 100.0),
+    ),
+    (
+        "diamond_chance",
+        Field::Int(|s| &mut s.ore_weights[7], 0.0, 100.0),
+    ),
+];
+
+fn declare_settings(r: &mut dyn Registrar) {
+    let mut defaults = Settings::DEFAULT;
+    for (key, field) in FIELDS {
+        let label = format!("{}.configuration.{key}", runtime::MOD_ID);
+        let spec = match field {
+            Field::Int(at, min, max) => SettingSpec::range(
+                key,
+                label.as_str(),
+                min,
+                max,
+                1.0,
+                f64::from(*at(&mut defaults)),
+            ),
+            Field::Rate(at) => {
+                SettingSpec::range(key, label.as_str(), 0.0, 1.0, 0.00005, *at(&mut defaults))
+            }
+            Field::Toggle(at) => SettingSpec::toggle(key, label.as_str(), *at(&mut defaults)),
+        };
+        let _ = r.register_setting(spec.tooltip(format!("{label}.tooltip")));
+    }
+}
+
+/// Take the player's settings for the server about to start: NeoForge reads a `worldRestart`
+/// value when the world loads, and generation reads [`settings`] from then on. A value the game
+/// cannot give keeps the original's default.
+pub fn read_settings(host: &dyn Host) {
+    let mut read = Settings::DEFAULT;
+    for (key, field) in FIELDS {
+        let Some(value) = host.setting(runtime::MOD_ID, key) else {
+            continue;
+        };
+        match field {
+            Field::Toggle(at) => match value.as_str() {
+                "true" => *at(&mut read) = true,
+                "false" => *at(&mut read) = false,
+                _ => {}
+            },
+            Field::Int(at, ..) => {
+                if let Ok(number) = value.parse::<f64>()
+                    && number.is_finite()
+                {
+                    *at(&mut read) = number.round() as i32;
+                }
+            }
+            Field::Rate(at) => {
+                if let Ok(number) = value.parse::<f64>()
+                    && number.is_finite()
+                {
+                    *at(&mut read) = number;
+                }
+            }
+        }
+    }
+    *SETTINGS.write().expect("the settings lock is not poisoned") = read;
+}
+
+/// The settings generation uses now.
+pub fn settings() -> Settings {
+    *SETTINGS.read().expect("the settings lock is not poisoned")
+}
+
+/// Register the type once, at startup: the settings, the palette's block keys, then the structure
 /// type that will place them.
 pub fn register(r: &mut dyn Registrar) {
+    declare_settings(r);
     let mut keys = std::collections::BTreeMap::new();
     for name in REQUESTED_BLOCKS {
         keys.insert(name, r.block_key(name));

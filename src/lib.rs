@@ -3,6 +3,7 @@
 //! | Moment | What the port does |
 //! |---|---|
 //! | [`Mod::register`] | `register_structure_type("mineshaft", …)`: the type the jar's thirteen data-pack structures name (`"type": "bettermineshafts:mineshaft"`) now has a generator, so they stop being `Unsupported` |
+//! | [`Mod::server_about_to_start`] | reads the settings (heights, spawn rates, small shaft length, ore deposits) the server's generation uses |
 //! | [`Mod::register_commands`] | registers `/bettermineshafts status` and `/bettermineshafts last`, answered from [`runtime::status_lines`] and the last start's record |
 //!
 //! The mod's own geometry is [`pieces`] (the five piece kinds, saved and loaded like any structure
@@ -16,7 +17,10 @@ pub mod pieces;
 pub mod runtime;
 pub mod support;
 
-use mod_api::{self, Hooks, RegisterCommandsEvent, Registrar, RegistrationContext, ServerHost};
+use mod_api::{
+    self, Hooks, RegisterCommandsEvent, Registrar, RegistrationContext, ServerAboutToStartEvent,
+    ServerHost,
+};
 
 #[derive(Default)]
 struct Mod;
@@ -26,6 +30,11 @@ impl Hooks for Mod {
     /// Once, at startup: the structure type the carried data-pack definitions name.
     fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
         support::register(r);
+    }
+
+    /// Before the server's worlds load: the settings this server's generation uses.
+    fn server_about_to_start(&self, host: &mut dyn ServerHost, _: &mut ServerAboutToStartEvent) {
+        support::read_settings(&*host);
     }
 
     /// Declare `/bettermineshafts status` in the server's command tree.

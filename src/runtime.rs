@@ -28,23 +28,72 @@ pub const TYPE_ID: &str = "bettermineshafts:mineshaft";
 /// The one structure this slice proves in the level: the oak variant, the jar's default.
 pub const STRUCTURE_ID: &str = "bettermineshafts:mineshaft_oak";
 
-/// `ConfigModule.minY` / `maxY`: the floor of a mineshaft is drawn from this range.
-pub const CONFIG_MIN_Y: i32 = -55;
-pub const CONFIG_MAX_Y: i32 = 30;
+/// `OreDeposit.OreType`'s kinds: cobble, coal, iron, redstone, gold, lapis, emerald, diamond.
+pub const ORE_KINDS: usize = 8;
 
-/// `ConfigModule.SpawnRates` (defaults; the mod's own config file is not data).
-pub const LANTERN_SPAWN_RATE: f32 = 0.0067;
-pub const TORCH_SPAWN_RATE: f32 = 0.02;
-pub const WORKSTATION_SPAWN_RATE: f32 = 0.025;
-pub const SMALL_SHAFT_SPAWN_RATE: f32 = 0.07;
-pub const COBWEB_SPAWN_RATE: f32 = 0.15;
-/// `ConfigModule.SpawnRates`' minecart rates, per block along a tunnel's middle: the main corridor
-/// (`BigTunnel`) and a small shaft (`SmallTunnel`).
-pub const MAIN_SHAFT_CHEST_MINECART_RATE: f32 = 0.01;
-pub const MAIN_SHAFT_TNT_MINECART_RATE: f32 = 0.0025;
-pub const SMALL_SHAFT_CHEST_MINECART_RATE: f32 = 0.00125;
-pub const SMALL_SHAFT_TNT_MINECART_RATE: f32 = 0.0025;
-pub const SMALL_SHAFT_PIECE_CHAIN_LENGTH: i32 = 9;
+/// The original's `worldRestart` settings (`ConfigModule`), with its defaults. The game keeps the
+/// player's values; [`crate::support`] reads them when a server is about to start. Rates are
+/// doubles, as the original compares a `nextFloat` against its `double` config value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Settings {
+    /// `minY` / `maxY`: the floor of a mineshaft is drawn from this range.
+    pub min_y: i32,
+    pub max_y: i32,
+    /// `SpawnRates`: lanterns in the main shaft, per ceiling cell.
+    pub lantern_rate: f64,
+    /// Torches along a small shaft, per block of its length.
+    pub torch_rate: f64,
+    /// Workstation side rooms along the main shaft.
+    pub workstation_rate: f64,
+    /// A cellar under a workstation room.
+    pub workstation_cellar_rate: f64,
+    /// Small shafts along the main shaft.
+    pub small_shaft_rate: f64,
+    /// Cobwebs, per cell (the original casts it to a float).
+    pub cobweb_rate: f64,
+    /// Minecarts, per block along a tunnel's middle: a small shaft (`SmallTunnel`) and the main
+    /// corridor (`BigTunnel`).
+    pub small_shaft_chest_minecart_rate: f64,
+    pub small_shaft_tnt_minecart_rate: f64,
+    pub main_shaft_chest_minecart_rate: f64,
+    pub main_shaft_tnt_minecart_rate: f64,
+    /// `zombieVillagerRoomSpawnRate`: out of 100, at a small shaft's end.
+    pub zombie_room_rate: i32,
+    /// `smallShaftPieceChainLength`: pieces in one small shaft.
+    pub small_shaft_chain_length: i32,
+    /// `Ores.enabled`: a small shaft's end may hold an ore deposit.
+    pub ore_deposits: bool,
+    /// `Ores`' chances: cobble, coal, iron, redstone, gold, lapis, emerald, diamond.
+    pub ore_weights: [i32; ORE_KINDS],
+}
+
+impl Settings {
+    /// `ConfigModule`'s defaults.
+    pub const DEFAULT: Self = Self {
+        min_y: -55,
+        max_y: 30,
+        lantern_rate: 0.0067,
+        torch_rate: 0.02,
+        workstation_rate: 0.025,
+        workstation_cellar_rate: 0.25,
+        small_shaft_rate: 0.07,
+        cobweb_rate: 0.15,
+        small_shaft_chest_minecart_rate: 0.00125,
+        small_shaft_tnt_minecart_rate: 0.0025,
+        main_shaft_chest_minecart_rate: 0.01,
+        main_shaft_tnt_minecart_rate: 0.0025,
+        zombie_room_rate: 2,
+        small_shaft_chain_length: 9,
+        ore_deposits: true,
+        ore_weights: [50, 20, 9, 7, 7, 3, 3, 1],
+    };
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 /// `BigTunnel.SECONDARY_AXIS_LEN`, `Y_AXIS_LEN`, `MAIN_AXIS_LEN` (secondary × height × length).
 pub const CORRIDOR_DIMS: [i32; 3] = [9, 8, 24];
@@ -69,18 +118,11 @@ pub const ORE_DEPOSIT_DIMS: [i32; 3] = [5, 5, 4];
 pub const ZOMBIE_ROOM_DIMS: [i32; 3] = [7, 5, 7];
 /// `SideRoomDungeon`'s box: 9 by 4 by 9.
 pub const SIDE_ROOM_DUNGEON_DIMS: [i32; 3] = [9, 4, 9];
-/// `ConfigModule.SpawnRates.workstationDungeonSpawnRate`.
-pub const WORKSTATION_DUNGEON_SPAWN_RATE: f32 = 0.25;
-/// `ConfigModule.Ores`' defaults: cobble, coal, iron, redstone, gold, lapis, emerald, diamond.
-pub const ORE_WEIGHTS: [i32; 8] = [50, 20, 9, 7, 7, 3, 3, 1];
-/// `ConfigModule.SpawnRates.zombieVillagerRoomSpawnRate`: out of 100, at a branch's end.
-pub const ZOMBIE_ROOM_SPAWN_RATE: i32 = 2;
-
-/// The ore a `nextInt(100)` draw picks (`OreDeposit.addChildren`): the index into
-/// [`ORE_WEIGHTS`] whose running total first passes the draw, cobble when none does.
-pub fn ore_for_roll(roll: i32) -> i32 {
+/// The ore a `nextInt(100)` draw picks (`OreDeposit.addChildren`): the index into `weights`
+/// whose running total first passes the draw, cobble when none does.
+pub fn ore_for_roll(roll: i32, weights: &[i32; ORE_KINDS]) -> i32 {
     let mut total = 0;
-    for (index, weight) in ORE_WEIGHTS.iter().enumerate() {
+    for (index, weight) in weights.iter().enumerate() {
         total += weight;
         if roll < total {
             return index as i32;
@@ -395,7 +437,7 @@ pub struct PieceSpec {
     pub depth: i32,
     /// Corridors only: the wall openings for the branches and rooms hanging off this segment.
     pub openings: Vec<Opening>,
-    /// An ore deposit's ore, an index into [`ORE_WEIGHTS`]; for a workstation room, 1 when a
+    /// An ore deposit's ore, an index into [`Settings::ore_weights`]; for a workstation room, 1 when a
     /// dungeon lies below it; 0 otherwise.
     pub variant: i32,
 }
@@ -535,6 +577,8 @@ pub struct LayoutRequest {
     pub world_max_y: i32,
     /// The most pieces this start may emit.
     pub budget: usize,
+    /// The settings the server started with.
+    pub settings: Settings,
 }
 
 impl LayoutRequest {
@@ -546,6 +590,7 @@ impl LayoutRequest {
             world_min_y: -64,
             world_max_y: 320,
             budget: MAX_PIECES,
+            settings: Settings::DEFAULT,
         }
     }
 }
@@ -679,6 +724,7 @@ struct Layout<'a, R: Roll> {
     assembly: &'a mut Assembly,
     random: &'a mut R,
     budget: usize,
+    settings: Settings,
 }
 
 impl<R: Roll> Layout<'_, R> {
@@ -755,7 +801,7 @@ impl<R: Roll> Layout<'_, R> {
     ) {
         let mut n = 0;
         while n < (len - 1) - 10 {
-            if self.random.next_f32() < WORKSTATION_SPAWN_RATE {
+            if f64::from(self.random.next_f32()) < self.settings.workstation_rate {
                 let y = b.min[1];
                 let (x, z, room_dir) = match (dir, left) {
                     (Facing::North, true) => (b.min[0] - 5, b.max[2] - n - 9, Facing::East),
@@ -786,7 +832,7 @@ impl<R: Roll> Layout<'_, R> {
 
     /// `SideRoom.addChildren`: a cave spider dungeon four blocks below, when the draw allows.
     fn room_children(&mut self, room: usize) {
-        if self.random.next_f32() >= WORKSTATION_DUNGEON_SPAWN_RATE {
+        if f64::from(self.random.next_f32()) >= self.settings.workstation_cellar_rate {
             return;
         }
         let piece = &self.assembly.pieces[room];
@@ -815,7 +861,7 @@ impl<R: Roll> Layout<'_, R> {
         let mut n = if left { 0 } else { 5 };
         let end = if left { (len - 1) - 4 } else { len };
         while n < end {
-            if self.random.next_f32() < SMALL_SHAFT_SPAWN_RATE {
+            if f64::from(self.random.next_f32()) < self.settings.small_shaft_rate {
                 let y = b.min[1];
                 let (x, z, shaft_dir) = match (dir, left) {
                     (Facing::North, true) => (b.min[0] - 1, b.max[2] - n, Facing::West),
@@ -856,10 +902,10 @@ impl<R: Roll> Layout<'_, R> {
     /// `generateAndAddSmallTunnelPiece`: one draw picks what the run continues with.
     fn small_tunnel(&mut self, x: i32, y: i32, z: i32, dir: Facing, chain: i32) -> Option<usize> {
         let roll = self.random.next_i32(100);
-        let last = SMALL_SHAFT_PIECE_CHAIN_LENGTH - 2;
+        let last = self.settings.small_shaft_chain_length - 2;
         if chain > last {
             // End of the run: a zombie villager room, else a pocket of ore.
-            if roll < ZOMBIE_ROOM_SPAWN_RATE {
+            if roll < self.settings.zombie_room_rate {
                 let (x, z) = match dir {
                     Facing::North => (x - 1, z),
                     Facing::East => (x, z - 1),
@@ -872,11 +918,14 @@ impl<R: Roll> Layout<'_, R> {
                 }
                 return self.add(PieceKind::ZombieRoom, bounds, dir, chain + 1);
             }
+            if !self.settings.ore_deposits {
+                return None;
+            }
             let bounds = java_box(x, y, z, dir, ORE_DEPOSIT_DIMS);
             if self.collides(&bounds) {
                 return None;
             }
-            let ore = ore_for_roll(self.random.next_i32(100));
+            let ore = ore_for_roll(self.random.next_i32(100), &self.settings.ore_weights);
             return self.add_with(PieceKind::OreDeposit, bounds, dir, chain + 1, ore);
         }
         let (kind, bounds) = if roll >= 90 && chain > 2 && chain < last {
@@ -1039,6 +1088,7 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
         assembly: &mut assembly,
         random,
         budget: request.budget,
+        settings: request.settings,
     };
     layout.big_tunnel(anchor[0], floor_y, anchor[1], request.facing, -1);
     assembly
@@ -1499,6 +1549,7 @@ mod tests {
             world_min_y: -64,
             world_max_y: 320,
             budget: MAX_PIECES,
+            settings: Settings::DEFAULT,
         }
     }
 
@@ -2045,10 +2096,51 @@ mod tests {
         // 50 cobble, 20 coal, 9 iron, 7 redstone, 7 gold, 3 lapis, 3 emerald, 1 diamond.
         let picks: Vec<i32> = [0, 49, 50, 69, 70, 78, 79, 85, 86, 92, 93, 95, 96, 98, 99]
             .iter()
-            .map(|roll| ore_for_roll(*roll))
+            .map(|roll| ore_for_roll(*roll, &Settings::DEFAULT.ore_weights))
             .collect();
         assert_eq!(picks, [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7]);
-        assert_eq!(ORE_WEIGHTS.iter().sum::<i32>(), 100);
+        assert_eq!(Settings::DEFAULT.ore_weights.iter().sum::<i32>(), 100);
+    }
+
+    #[test]
+    fn the_settings_steer_the_layout() {
+        let count = |settings: Settings, kind: PieceKind| -> usize {
+            (0..200)
+                .map(|seed| {
+                    let mut random = VanillaRandom::new(0);
+                    random.set_large_feature_seed(seed, 0, 0);
+                    let request = LayoutRequest {
+                        settings,
+                        ..request(random.facing())
+                    };
+                    assemble(&mut random, &request)
+                        .pieces
+                        .iter()
+                        .filter(|piece| piece.kind == kind)
+                        .count()
+                })
+                .sum()
+        };
+        let defaults = Settings::DEFAULT;
+        assert!(count(defaults, PieceKind::OreDeposit) > 0);
+        let no_ores = Settings {
+            ore_deposits: false,
+            ..defaults
+        };
+        assert_eq!(count(no_ores, PieceKind::OreDeposit), 0);
+        let outposts = Settings {
+            zombie_room_rate: 100,
+            ..defaults
+        };
+        assert_eq!(count(outposts, PieceKind::OreDeposit), 0);
+        assert!(count(outposts, PieceKind::ZombieRoom) > 0);
+        let no_rooms = Settings {
+            workstation_rate: 0.0,
+            small_shaft_rate: 0.0,
+            ..defaults
+        };
+        assert_eq!(count(no_rooms, PieceKind::Room), 0);
+        assert_eq!(count(no_rooms, PieceKind::Branch), 0);
     }
 
     #[test]
@@ -2063,7 +2155,7 @@ mod tests {
                 }
                 ends += 1;
                 assert!(
-                    piece.depth > SMALL_SHAFT_PIECE_CHAIN_LENGTH - 2,
+                    piece.depth > Settings::DEFAULT.small_shaft_chain_length - 2,
                     "seed {seed}"
                 );
             }

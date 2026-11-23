@@ -51,8 +51,8 @@ const ALWAYS: [(&str, &[(&str, &str)]); 7] = [
 #[derive(Debug)]
 pub struct Extra {
     pub cobblestone: BlockState,
-    /// `OreDeposit.OreType`'s blocks, in [`runtime::ORE_WEIGHTS`] order.
-    pub ores: [BlockState; 8],
+    /// `OreDeposit.OreType`'s blocks, in [`runtime::Settings::ore_weights`] order.
+    pub ores: [BlockState; runtime::ORE_KINDS],
     pub stone: BlockState,
     pub furnace: BlockState,
     pub chest: BlockState,
@@ -154,6 +154,7 @@ pub struct Resolved {
     pub crafting_table: BlockState,
     pub ladders: [BlockState; 4],
     pub vines: [BlockState; 4],
+    pub wall_torches: [BlockState; 4],
     /// The flat rails a stair's last step carries: `[north_south, east_west]`.
     pub flat_rails: [BlockState; 2],
     /// The ascending rail for each [`LADDER_FACINGS`] entry, rising toward that facing's opposite.
@@ -173,6 +174,10 @@ impl Resolved {
 
     pub fn vine(&self, facing: Facing) -> BlockState {
         self.vines[facing_index(facing)]
+    }
+
+    pub fn wall_torch(&self, facing: Facing) -> BlockState {
+        self.wall_torches[facing_index(facing)]
     }
 
     /// The rail a stair step carries for a piece running into `facing`: the last step is flat along
@@ -215,6 +220,7 @@ pub fn resolve(
     }
     let mut ladders = Vec::new();
     let mut vines = Vec::new();
+    let mut wall_torches = Vec::new();
     let mut ascending_rails = Vec::new();
     let mut powered_ascending_rails = Vec::new();
     for facing in LADDER_FACINGS {
@@ -225,6 +231,10 @@ pub fn resolve(
         vines.push(state(&BlockRef::with(
             "minecraft:vine",
             &[(facing.name(), "true")],
+        ))?);
+        wall_torches.push(state(&BlockRef::with(
+            "minecraft:wall_torch",
+            &[("facing", facing.name())],
         ))?);
         let shape = runtime::stair_rail_shape(facing, false);
         ascending_rails.push(state(&BlockRef::with(
@@ -281,6 +291,9 @@ pub fn resolve(
         })?,
         vines: <[BlockState; 4]>::try_from(vines).map_err(|_| {
             StructureError("bettermineshafts: the vine table is the wrong length".into())
+        })?,
+        wall_torches: <[BlockState; 4]>::try_from(wall_torches).map_err(|_| {
+            StructureError("bettermineshafts: the wall torch table is the wrong length".into())
         })?,
         flat_rails,
         ascending_rails: <[BlockState; 4]>::try_from(ascending_rails).map_err(|_| {
@@ -339,6 +352,8 @@ pub struct Piece {
     pub spec: PieceSpec,
     pub palette: Palette,
     pub blocks: Arc<Resolved>,
+    /// The settings the server started with, which the decorations' rates read.
+    pub settings: runtime::Settings,
 }
 
 /// Where the entrance's shaft ends and where its surface tunnel runs, in the piece's frame.
@@ -353,11 +368,17 @@ struct EntranceSite {
 const ENTRANCE_CENTRE: i32 = runtime::ENTRANCE_RADIUS;
 
 impl Piece {
-    pub fn new(spec: PieceSpec, palette: Palette, blocks: Arc<Resolved>) -> Self {
+    pub fn new(
+        spec: PieceSpec,
+        palette: Palette,
+        blocks: Arc<Resolved>,
+        settings: runtime::Settings,
+    ) -> Self {
         Self {
             spec,
             palette,
             blocks,
+            settings,
         }
     }
 
@@ -758,8 +779,8 @@ impl Piece {
             ctx,
             w / 2,
             d,
-            runtime::MAIN_SHAFT_CHEST_MINECART_RATE,
-            runtime::MAIN_SHAFT_TNT_MINECART_RATE,
+            self.settings.main_shaft_chest_minecart_rate,
+            self.settings.main_shaft_tnt_minecart_rate,
         );
         self.lanterns(ctx, w, d);
         self.gravel(ctx, w, d);
@@ -875,7 +896,7 @@ impl Piece {
         for y in from[1]..=to[1] {
             for x in from[0]..=to[0] {
                 for z in from[2]..=to[2] {
-                    if self.roll(ctx) < runtime::COBWEB_SPAWN_RATE {
+                    if self.roll(ctx) < self.settings.cobweb_rate as f32 {
                         self.set_if_air(ctx, [x, y, z], self.blocks.cobweb);
                     }
                 }
@@ -910,13 +931,13 @@ impl Piece {
 
     /// `generateChestCarts` then `generateTntCarts`: along the tunnel's middle, a minecart now and
     /// then on ground that is not air, inside the chunk being written.
-    fn carts(&self, ctx: &mut dyn PieceContext, x: i32, d: i32, chest_rate: f32, tnt_rate: f32) {
+    fn carts(&self, ctx: &mut dyn PieceContext, x: i32, d: i32, chest_rate: f64, tnt_rate: f64) {
         for (id, rate, loot) in [
             ("minecraft:chest_minecart", chest_rate, true),
             ("minecraft:tnt_minecart", tnt_rate, false),
         ] {
             for z in 0..=d {
-                if self.roll(ctx) >= rate {
+                if f64::from(self.roll(ctx)) >= rate {
                     continue;
                 }
                 let local = [x, 1, z];
@@ -957,7 +978,7 @@ impl Piece {
         while z <= d {
             let mut placed = false;
             for x in 3..=w - 3 {
-                if self.roll(ctx) < runtime::LANTERN_SPAWN_RATE {
+                if f64::from(self.roll(ctx)) < self.settings.lantern_rate {
                     let ceiling = self
                         .get(ctx, [x, 8, z])
                         .is_some_and(|state| !ctx.is_air(state));
@@ -1038,7 +1059,8 @@ impl Piece {
             }
         }
         let seed = runtime::piece_seed(&self.spec.bounds);
-        for z in runtime::branch_supports(d + 1, seed) {
+        let supports = runtime::branch_supports(d + 1, seed);
+        for &z in &supports {
             let mut covered = 0;
             for x in 1..=w - 1 {
                 if !self.is_air_mut(ctx, [x, height - 1, z]) {
@@ -1064,10 +1086,36 @@ impl Piece {
             ctx,
             w / 2,
             d,
-            runtime::SMALL_SHAFT_CHEST_MINECART_RATE,
-            runtime::SMALL_SHAFT_TNT_MINECART_RATE,
+            self.settings.small_shaft_chest_minecart_rate,
+            self.settings.small_shaft_tnt_minecart_rate,
         );
         self.vines(ctx, w, d);
+        self.torches(ctx, w, d, &supports);
+    }
+
+    /// `SmallTunnel.generateTorches`: off the supports, a wall torch on the left wall with half the
+    /// rate, on the right with the other half, where the cell is air and the wall is not.
+    fn torches(&self, ctx: &mut dyn PieceContext, w: i32, d: i32, supports: &[i32]) {
+        let right = right_of(self.spec.facing);
+        for z in 0..=d {
+            if supports.contains(&z) {
+                continue;
+            }
+            let roll = f64::from(self.roll(ctx));
+            let (x, wall, facing) = if roll < self.settings.torch_rate / 2.0 {
+                (1, 0, right)
+            } else if roll < self.settings.torch_rate {
+                (w - 1, w, right.opposite())
+            } else {
+                continue;
+            };
+            let wall_solid = self
+                .get(ctx, [wall, 2, z])
+                .is_some_and(|state| !ctx.is_air(state));
+            if wall_solid && self.is_air_mut(ctx, [x, 2, z]) {
+                self.set(ctx, [x, 2, z], self.blocks.wall_torch(facing));
+            }
+        }
     }
 
     /// `SmallTunnelStairs.postProcess`: five descending slices, each with its own floor and a rail.
@@ -2054,7 +2102,7 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
         _ => 0,
     };
     let variant = match root.get("variant") {
-        Some(Tag::Int(variant)) => (*variant).clamp(0, runtime::ORE_WEIGHTS.len() as i32 - 1),
+        Some(Tag::Int(variant)) => (*variant).clamp(0, runtime::ORE_KINDS as i32 - 1),
         _ => 0,
     };
     let box_ = match root.get("BB") {
