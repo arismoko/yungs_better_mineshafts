@@ -54,6 +54,9 @@ pub struct Extra {
     /// `OreDeposit.OreType`'s blocks, in [`runtime::ORE_WEIGHTS`] order.
     pub ores: [BlockState; 8],
     pub stone: BlockState,
+    pub furnace: BlockState,
+    pub chest: BlockState,
+    pub ladder_north: BlockState,
     pub stone_bricks: BlockState,
     pub stone_slab: BlockState,
     pub cobblestone_slab: BlockState,
@@ -87,6 +90,9 @@ fn resolve_extra(metadata: &dyn BlockMetadata) -> Result<Extra, StructureError> 
             ore("minecraft:diamond_ore")?,
         ],
         stone: s("minecraft:stone", &[])?,
+        furnace: s("minecraft:furnace", &[("facing", "north")])?,
+        chest: s("minecraft:chest", &[])?,
+        ladder_north: s("minecraft:ladder", &[("facing", "north")])?,
         stone_bricks: s("minecraft:stone_bricks", &[])?,
         stone_slab: s("minecraft:stone_slab", &[])?,
         cobblestone_slab: s("minecraft:cobblestone_slab", &[])?,
@@ -928,14 +934,147 @@ impl Piece {
                 previous_x = x;
             }
         }
-        // A crafting table, upstream's half-chance decoration.
+        // Two furnaces, each fuelled with up to 32 coal in the fuel slot, then upstream's
+        // half-chance crafting table.
+        let furnace_facing = self.world_dir("north");
+        let furnace = self.state_of(ctx, "minecraft:furnace", &[("facing", furnace_facing)]);
+        for x in [2, 1] {
+            if ctx.random().next_int_bound(2) == 0 {
+                self.set(ctx, [x, 1, 1], furnace);
+                let coal = ctx.random().next_int_bound(33);
+                self.furnace_entity(ctx, [x, 1, 1], coal);
+            }
+        }
         if self.roll(ctx) < 0.5 {
             self.set(ctx, [3, 1, 1], self.blocks.crafting_table);
         }
-        // Legs under the corners, as upstream's `SideRoom.generateLegs` does whenever there is no
-        // dungeon below (`hasDownstairs`) — and the dungeon is a recorded gap here.
-        for (x, z) in [(1, 1), (1, d - 1), (w - 1, 1), (w - 1, d - 1)] {
+        // A barrel of loot one time in four.
+        if ctx.random().next_int_bound(4) == 0 {
+            self.barrel(ctx, [w - 1, 1, 1]);
+        }
+        // The way down to the dungeon, when there is one; otherwise legs under the corners.
+        if self.spec.variant == 1 {
+            let ladder = self.state_of(
+                ctx,
+                "minecraft:ladder",
+                &[("facing", self.world_dir("north"))],
+            );
+            self.set(ctx, [6, 0, 1], ladder);
+            let mut properties: Vec<(String, String)> =
+                self.palette.blocks.trapdoor.properties.clone();
+            properties.retain(|(name, _)| name != "facing");
+            properties.push(("facing".into(), self.world_dir("north").into()));
+            let properties: Vec<(&str, &str)> = properties
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let trapdoor = self.state_of(ctx, &self.palette.blocks.trapdoor.name, &properties);
+            self.set(ctx, [6, 1, 1], trapdoor);
+        } else {
+            for (x, z) in [(1, 1), (1, d - 1), (w - 1, 1), (w - 1, d - 1)] {
+                self.leg(ctx, x, z);
+            }
+        }
+    }
+
+    /// A furnace's saved fuel: `count` coal in slot 1 (none when the draw was zero).
+    fn furnace_entity(&self, ctx: &mut dyn PieceContext, local: [i32; 3], coal: i32) {
+        let mut furnace = Compound::new();
+        furnace.insert("id".into(), Tag::String("minecraft:furnace".into()));
+        if coal > 0 {
+            let mut item = Compound::new();
+            item.insert("Slot".into(), Tag::Byte(1));
+            item.insert("id".into(), Tag::String("minecraft:coal".into()));
+            item.insert("count".into(), Tag::Int(coal));
+            furnace.insert("Items".into(), Tag::List(vec![Tag::Compound(item)]));
+        }
+        self.block_entity_at(ctx, local, furnace);
+    }
+
+    /// `addBarrel`: a barrel that rolls the abandoned mineshaft's loot.
+    fn barrel(&self, ctx: &mut dyn PieceContext, local: [i32; 3]) {
+        self.set(ctx, local, self.blocks.extra.barrel);
+        let mut barrel = Compound::new();
+        barrel.insert("id".into(), Tag::String("minecraft:barrel".into()));
+        barrel.insert(
+            "LootTable".into(),
+            Tag::String("minecraft:chests/abandoned_mineshaft".into()),
+        );
+        self.block_entity_at(ctx, local, barrel);
+    }
+
+    /// `createChest`: a chest that rolls the abandoned mineshaft's loot.
+    fn chest(&self, ctx: &mut dyn PieceContext, local: [i32; 3]) {
+        self.set(ctx, local, self.blocks.extra.chest);
+        let mut chest = Compound::new();
+        chest.insert("id".into(), Tag::String("minecraft:chest".into()));
+        chest.insert(
+            "LootTable".into(),
+            Tag::String("minecraft:chests/abandoned_mineshaft".into()),
+        );
+        self.block_entity_at(ctx, local, chest);
+    }
+
+    /// `chanceReplaceAir`: an air cell becomes `state` with `chance`.
+    fn chance_replace_air(
+        &self,
+        ctx: &mut dyn PieceContext,
+        chance: f32,
+        from: [i32; 3],
+        to: [i32; 3],
+        state: BlockState,
+    ) {
+        for y in from[1]..=to[1] {
+            for x in from[0]..=to[0] {
+                for z in from[2]..=to[2] {
+                    let local = [x, y, z];
+                    if !self.visible(ctx, local) {
+                        continue;
+                    }
+                    if self.roll(ctx) < chance && self.is_air_mut(ctx, local) {
+                        self.set(ctx, local, state);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `SideRoomDungeon.postProcess`: a brick cell with a cave spider spawner, cobwebs and chests.
+    fn write_side_room_dungeon(&self, ctx: &mut dyn PieceContext) {
+        let [width, height, depth] = runtime::SIDE_ROOM_DUNGEON_DIMS;
+        let (xe, ye, ze) = (width - 1, height - 1, depth - 1);
+        for y in 0..=ye {
+            for x in 0..=xe {
+                for z in 0..=ze {
+                    let state = self.pick(ctx, &self.blocks.brick_random);
+                    self.set(ctx, [x, y, z], state);
+                }
+            }
+        }
+        self.carve(ctx, [1, 1, 1], [xe - 1, ye - 1, ze - 1]);
+        for (x, z) in [(1, 1), (1, ze - 1), (xe - 1, 1), (xe - 1, ze - 1)] {
             self.leg(ctx, x, z);
+        }
+        let ladder = self.state_of(
+            ctx,
+            "minecraft:ladder",
+            &[("facing", self.world_dir("north"))],
+        );
+        self.fill(ctx, [4, 1, 1], [4, 3, 1], ladder);
+        self.set(ctx, [4, 1, 5], self.blocks.extra.spawner);
+        let mut spawner = Compound::new();
+        spawner.insert("id".into(), Tag::String("minecraft:mob_spawner".into()));
+        let mut entity = Compound::new();
+        entity.insert("id".into(), Tag::String("minecraft:cave_spider".into()));
+        let mut data = Compound::new();
+        data.insert("entity".into(), Tag::Compound(entity));
+        spawner.insert("SpawnData".into(), Tag::Compound(data));
+        self.block_entity_at(ctx, [4, 1, 5], spawner);
+        self.chance_replace_air(ctx, 0.9, [3, 1, 4], [5, 2, 6], self.blocks.cobweb);
+        self.chance_replace_air(ctx, 0.1, [1, 1, 1], [xe - 1, 2, ze], self.blocks.cobweb);
+        self.chest(ctx, [1, 1, ze - 1]);
+        if ctx.random().next_int_bound(2) == 0 {
+            self.chest(ctx, [xe - 1, 1, ze - 1]);
         }
     }
 }
@@ -1272,6 +1411,7 @@ impl StructurePiece for Piece {
             PieceKind::Room => self.write_room(ctx),
             PieceKind::OreDeposit => self.write_ore_deposit(ctx),
             PieceKind::ZombieRoom => self.write_zombie_room(ctx),
+            PieceKind::SideRoomDungeon => self.write_side_room_dungeon(ctx),
         }
         Ok(())
     }

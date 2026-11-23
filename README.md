@@ -14,8 +14,9 @@ A port of [YUNG's Better Mineshafts](https://github.com/YUNG-GANG/YUNGs-Better-M
 
 ## Differences from the original
 
-- Five of the original's ten piece kinds are not built yet: turns, layered intersections, ore deposits, zombie-villager rooms and side-room dungeons; nor is the surface tunnel above the entrance.
-- Biome decorations (snow, lush and dripstone growth, cactus, dead bushes, mushrooms), minecarts and chests are not placed.
+- Turns and layered intersections are not built, nor is the surface tunnel above the entrance; branches are straight runs and stairs that end in an ore deposit or, rarely, a zombie villager room.
+- Biome decorations (snow, lush and dripstone growth, cactus, dead bushes, mushrooms) are not placed.
+- The spawn rates, ore weights and height range are the original's defaults and cannot be changed.
 - The status commands are this port's own; the original has none.
 
 ## Building

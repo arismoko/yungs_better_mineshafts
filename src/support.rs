@@ -111,8 +111,10 @@ static KEYS: std::sync::OnceLock<std::collections::BTreeMap<&'static str, mod_ap
 /// Every block the port may place: the fixed set the piece writers name, plus every block id the
 /// thirteen carried structure configs name (all palettes, so a variant's own palette resolves).
 /// A test beside this table reads the carried files and fails if one names a block it lacks.
-pub const REQUESTED_BLOCKS: [&str; 95] = [
+pub const REQUESTED_BLOCKS: [&str; 97] = [
     "minecraft:acacia_fence",
+    "minecraft:chest",
+    "minecraft:furnace",
     "minecraft:anvil",
     "minecraft:barrel",
     "minecraft:black_bed",

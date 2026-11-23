@@ -63,6 +63,10 @@ pub const ROOM_DIMS: [i32; 3] = [10, 5, 5];
 pub const ORE_DEPOSIT_DIMS: [i32; 3] = [5, 5, 4];
 /// `ZombieVillagerRoom`'s box: 7 by 5 by 7.
 pub const ZOMBIE_ROOM_DIMS: [i32; 3] = [7, 5, 7];
+/// `SideRoomDungeon`'s box: 9 by 4 by 9.
+pub const SIDE_ROOM_DUNGEON_DIMS: [i32; 3] = [9, 4, 9];
+/// `ConfigModule.SpawnRates.workstationDungeonSpawnRate`.
+pub const WORKSTATION_DUNGEON_SPAWN_RATE: f32 = 0.25;
 /// `ConfigModule.Ores`' defaults: cobble, coal, iron, redstone, gold, lapis, emerald, diamond.
 pub const ORE_WEIGHTS: [i32; 8] = [50, 20, 9, 7, 7, 3, 3, 1];
 /// `ConfigModule.SpawnRates.zombieVillagerRoomSpawnRate`: out of 100, at a branch's end.
@@ -321,6 +325,8 @@ pub enum PieceKind {
     OreDeposit,
     /// The 7×5×7 room with an iron door and a zombie villager spawner (`ZombieVillagerRoom`).
     ZombieRoom,
+    /// The 9×4×9 cave spider dungeon below a workstation room (`SideRoomDungeon`).
+    SideRoomDungeon,
 }
 
 impl PieceKind {
@@ -333,6 +339,7 @@ impl PieceKind {
             Self::Room => "room",
             Self::OreDeposit => "ore_deposit",
             Self::ZombieRoom => "zombie_room",
+            Self::SideRoomDungeon => "side_room_dungeon",
         }
     }
 
@@ -345,6 +352,7 @@ impl PieceKind {
             "room" => Some(Self::Room),
             "ore_deposit" => Some(Self::OreDeposit),
             "zombie_room" => Some(Self::ZombieRoom),
+            "side_room_dungeon" => Some(Self::SideRoomDungeon),
             _ => None,
         }
     }
@@ -369,7 +377,8 @@ pub struct PieceSpec {
     pub depth: i32,
     /// Corridors only: the wall openings for the branches and rooms hanging off this segment.
     pub openings: Vec<Opening>,
-    /// An ore deposit's ore, an index into [`ORE_WEIGHTS`]; 0 for every other kind.
+    /// An ore deposit's ore, an index into [`ORE_WEIGHTS`]; for a workstation room, 1 when a
+    /// dungeon lies below it; 0 otherwise.
     pub variant: i32,
 }
 
@@ -409,6 +418,7 @@ impl PieceSpec {
             PieceKind::Room => ROOM_DIMS,
             PieceKind::OreDeposit => ORE_DEPOSIT_DIMS,
             PieceKind::ZombieRoom => ZOMBIE_ROOM_DIMS,
+            PieceKind::SideRoomDungeon => SIDE_ROOM_DUNGEON_DIMS,
         };
         let height = if self.kind == PieceKind::Entrance {
             self.bounds.span()[1].max(height)
@@ -471,7 +481,7 @@ impl Assembly {
     /// The readout's one-line summary: `9 pieces (entrance 1, corridor 3, branch 3, stairs 1, room 2)`.
     pub fn summary(&self) -> String {
         let mut text = format!(
-            "{} pieces (entrance {}, corridor {}, branch {}, stairs {}, room {}, ore deposit {}, zombie room {})",
+            "{} pieces (entrance {}, corridor {}, branch {}, stairs {}, room {}, ore deposit {}, zombie room {}, dungeon {})",
             self.total(),
             self.count(PieceKind::Entrance),
             self.count(PieceKind::Corridor),
@@ -480,6 +490,7 @@ impl Assembly {
             self.count(PieceKind::Room),
             self.count(PieceKind::OreDeposit),
             self.count(PieceKind::ZombieRoom),
+            self.count(PieceKind::SideRoomDungeon),
         );
         if self.truncated {
             text.push_str(", truncated by the budget");
@@ -746,7 +757,27 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
                 openings: Vec::new(),
                 variant: 0,
             };
-            push(&mut assembly, room, request.budget);
+            let room_index = push(&mut assembly, room, request.budget);
+            // `SideRoom.addChildren`: a cave spider dungeon four blocks below the room, whose floor
+            // then has a ladder and a trapdoor down to it.
+            if let Some(room_index) = room_index
+                && random.next_f32() < WORKSTATION_DUNGEON_SPAWN_RATE
+            {
+                let room = &assembly.pieces[room_index];
+                let mut below = room.local_to_world([6, 0, 0]);
+                below[1] = room.bounds.min[1] - 4;
+                let dungeon = PieceSpec {
+                    kind: PieceKind::SideRoomDungeon,
+                    bounds: piece_box(below, side, SIDE_ROOM_DUNGEON_DIMS),
+                    facing: side,
+                    depth,
+                    openings: Vec::new(),
+                    variant: 0,
+                };
+                if push(&mut assembly, dungeon, request.budget).is_some() {
+                    assembly.pieces[room_index].variant = 1;
+                }
+            }
         }
 
         // The far face is the box's high coordinate on a positive run and its low one on a
@@ -1275,8 +1306,8 @@ mod tests {
 
     #[test]
     fn a_normal_start_places_an_entrance_a_corridor_a_branch_and_a_room() {
-        // Seed 320 places all five kinds; the pinned summary is what the readout reports.
-        let assembly = assemble_with(320);
+        // Seed 521 places all five kinds; the pinned summary is what the readout reports.
+        let assembly = assemble_with(521);
         assert!(assembly.refusal.is_none());
         assert_eq!(assembly.count(PieceKind::Entrance), 1);
         assert_eq!(assembly.count(PieceKind::Corridor), 4);
@@ -1284,9 +1315,10 @@ mod tests {
         assert_eq!(assembly.count(PieceKind::Stairs), 1);
         assert_eq!(assembly.count(PieceKind::Room), 1);
         assert_eq!(assembly.count(PieceKind::OreDeposit), 1);
+        assert_eq!(assembly.count(PieceKind::SideRoomDungeon), 1);
         assert_eq!(
             assembly.summary(),
-            "10 pieces (entrance 1, corridor 4, branch 2, stairs 1, room 1, ore deposit 1, zombie room 0)"
+            "11 pieces (entrance 1, corridor 4, branch 2, stairs 1, room 1, ore deposit 1, zombie room 0, dungeon 1)"
         );
         assert!(!assembly.truncated);
         assert!(assembly.total() <= MAX_PIECES);
@@ -1521,7 +1553,7 @@ mod tests {
         assert!(first.refusal.is_none());
         assert_eq!(
             first.summary(),
-            "9 pieces (entrance 1, corridor 3, branch 2, stairs 1, room 1, ore deposit 1, zombie room 0)"
+            "10 pieces (entrance 1, corridor 4, branch 1, stairs 2, room 1, ore deposit 1, zombie room 0, dungeon 0)"
         );
         let lines = status_lines();
         assert_eq!(lines.len(), 3);
@@ -1533,7 +1565,7 @@ mod tests {
         }
         assert!(lines[2].contains(&first.summary()));
         assert!(
-            lines[2].contains("stairs 1"),
+            lines[2].contains("stairs 2"),
             "the readout names the stair kind"
         );
     }
@@ -1649,22 +1681,24 @@ mod tests {
 
     #[test]
     fn a_corridor_opens_its_wall_where_a_room_hangs_off_it() {
-        let assembly = assemble_with(320);
+        let assembly = assemble_with(521);
         let room = assembly
             .pieces
             .iter()
             .find(|piece| piece.kind == PieceKind::Room)
-            .expect("seed 320 places a room");
-        let corridor = assembly
+            .expect("seed 521 places a room");
+        let (corridor, opening) = assembly
             .pieces
             .iter()
-            .find(|piece| piece.kind == PieceKind::Corridor && !piece.openings.is_empty())
+            .filter(|piece| piece.kind == PieceKind::Corridor)
+            .find_map(|piece| {
+                piece
+                    .openings
+                    .iter()
+                    .find(|opening| opening.side == room.facing && opening.len == 2)
+                    .map(|opening| (piece, opening))
+            })
             .expect("a corridor carries the room's opening");
-        let opening = corridor
-            .openings
-            .iter()
-            .find(|opening| opening.side == room.facing)
-            .expect("an opening on the room's side");
         assert_eq!(opening.side, room.facing);
         assert_eq!(opening.len, 2);
         let axis = corridor.facing.axis();
@@ -1862,12 +1896,12 @@ mod tests {
 
     #[test]
     fn a_branch_ends_in_an_ore_deposit_or_a_zombie_room() {
-        let assembly = assemble_with(320);
+        let assembly = assemble_with(521);
         let end = assembly
             .pieces
             .iter()
             .find(|piece| piece.kind == PieceKind::OreDeposit)
-            .expect("seed 320 ends a branch in ore");
+            .expect("seed 521 ends a branch in ore");
         assert_eq!(end.bounds.span(), ORE_DEPOSIT_DIMS);
         let last_branch = assembly
             .pieces
