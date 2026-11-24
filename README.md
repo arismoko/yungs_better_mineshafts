@@ -16,7 +16,7 @@ A port of [YUNG's Better Mineshafts](https://github.com/YUNG-GANG/YUNGs-Better-M
 ## Differences from the original
 
 - The four-way intersection keeps seven blocks of width where the original's box is a block off; the layout follows the original's chain otherwise.
-- Snow, cactus, dead bushes, mushrooms and moss carpet are placed as in the original. The lush and dripstone feature patches (moss patches, clay pools, dripstone clusters) are not, because a structure piece cannot run a configured feature yet.
+- `/locate structure mineshaft` answers with the original's hint only when a player types it; through `execute`, a function, a command block or the console it still runs vanilla's search (sunrise-org/sunrise#5266).
 - The status commands are this port's own; the original has none.
 
 ## Building

@@ -92,6 +92,7 @@ impl StructureType for MineshaftType {
         Some(FoundStructure {
             position: assembly.start,
             pieces: placed,
+            ..Default::default()
         })
     }
 

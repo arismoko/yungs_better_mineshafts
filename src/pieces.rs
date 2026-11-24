@@ -462,8 +462,8 @@ impl Piece {
     }
 
     fn carve(&self, ctx: &mut dyn PieceContext, from: [i32; 3], to: [i32; 3]) {
-        for y in from[1]..=to[1] {
-            for x in from[0]..=to[0] {
+        for x in from[0]..=to[0] {
+            for y in from[1]..=to[1] {
                 for z in from[2]..=to[2] {
                     self.set(ctx, [x, y, z], self.blocks.air);
                 }
@@ -472,8 +472,8 @@ impl Piece {
     }
 
     fn fill(&self, ctx: &mut dyn PieceContext, from: [i32; 3], to: [i32; 3], state: BlockState) {
-        for y in from[1]..=to[1] {
-            for x in from[0]..=to[0] {
+        for x in from[0]..=to[0] {
+            for y in from[1]..=to[1] {
                 for z in from[2]..=to[2] {
                     self.set(ctx, [x, y, z], state);
                 }
@@ -556,8 +556,8 @@ impl Piece {
 
     /// `chanceReplaceNonAir(rate, main randomizer)` over a local box.
     fn randomize_range(&self, ctx: &mut dyn PieceContext, rate: f32, from: [i32; 3], to: [i32; 3]) {
-        for y in from[1]..=to[1] {
-            for x in from[0]..=to[0] {
+        for x in from[0]..=to[0] {
+            for y in from[1]..=to[1] {
                 for z in from[2]..=to[2] {
                     let at = [x, y, z];
                     if self.visible(ctx, at)
@@ -832,8 +832,8 @@ impl Piece {
     }
 
     fn cobwebs(&self, ctx: &mut dyn PieceContext, from: [i32; 3], to: [i32; 3]) {
-        for y in from[1]..=to[1] {
-            for x in from[0]..=to[0] {
+        for x in from[0]..=to[0] {
+            for y in from[1]..=to[1] {
                 for z in from[2]..=to[2] {
                     if self.roll(ctx) < self.settings.cobweb_rate as f32 {
                         self.set_if_air(ctx, [x, y, z], self.blocks.cobweb);
@@ -1271,8 +1271,8 @@ impl Piece {
         to: [i32; 3],
         state: BlockState,
     ) {
-        for y in from[1]..=to[1] {
-            for x in from[0]..=to[0] {
+        for x in from[0]..=to[0] {
+            for y in from[1]..=to[1] {
                 for z in from[2]..=to[2] {
                     let local = [x, y, z];
                     if !self.visible(ctx, local) {
@@ -1392,8 +1392,8 @@ impl Piece {
         to: [i32; 3],
         state: BlockState,
     ) {
-        for y in from[1]..=to[1] {
-            for x in from[0]..=to[0] {
+        for x in from[0]..=to[0] {
+            for y in from[1]..=to[1] {
                 for z in from[2]..=to[2] {
                     let local = [x, y, z];
                     if !self.visible(ctx, local) {
@@ -1416,8 +1416,8 @@ impl Piece {
         to: [i32; 3],
         state: BlockState,
     ) {
-        for y in from[1]..=to[1] {
-            for x in from[0]..=to[0] {
+        for x in from[0]..=to[0] {
+            for y in from[1]..=to[1] {
                 for z in from[2]..=to[2] {
                     let local = [x, y, z];
                     if !self.visible(ctx, local) {
@@ -1443,8 +1443,8 @@ impl Piece {
         to: [i32; 3],
         state: BlockState,
     ) {
-        for y in from[1]..=to[1] {
-            for x in from[0]..=to[0] {
+        for x in from[0]..=to[0] {
+            for y in from[1]..=to[1] {
                 for z in from[2]..=to[2] {
                     let local = [x, y, z];
                     if !self.visible(ctx, local) {
@@ -1637,10 +1637,9 @@ impl Piece {
 
 /// The three small-tunnel pieces that are not a straight run, in the piece's own frame.
 impl Piece {
-    /// `addBiomeDecorations` over the piece's box but its top layer: snow, cacti, dead bushes,
-    /// mushrooms and moss carpet at the palette's chances. The lush and dripstone feature patches
-    /// (`CaveFeatures.MOSS_PATCH`, `POINTED_DRIPSTONE`) are not placed: a piece cannot run a
-    /// configured feature.
+    /// `addBiomeDecorations` over the piece's box but its top layer: snow, the lush caves'
+    /// moss, clay and moss-ceiling patches and moss carpet, the dripstone clusters and pointed
+    /// dripstone, cacti, dead bushes and mushrooms, at the palette's chances.
     fn decorate(&self, ctx: &mut dyn PieceContext) {
         let [w, h, d] = self.spec.dims();
         self.decorate_range(ctx, [0, 0, 0], [w - 1, h - 2, d - 1]);
@@ -1652,7 +1651,8 @@ impl Piece {
             || chances.cactus > 0.0
             || chances.dead_bush > 0.0
             || chances.mushroom > 0.0
-            || chances.lush;
+            || chances.lush
+            || chances.dripstone;
         if !any {
             return;
         }
@@ -1679,8 +1679,8 @@ impl Piece {
         let red = named(ctx, "minecraft:red_mushroom");
         let brown = named(ctx, "minecraft:brown_mushroom");
         let moss = named(ctx, "minecraft:moss_carpet");
-        for y in from[1]..=to[1] {
-            for x in from[0]..=to[0] {
+        for x in from[0]..=to[0] {
+            for y in from[1]..=to[1] {
                 for z in from[2]..=to[2] {
                     let at = [x, y, z];
                     if !self.visible(ctx, at) {
@@ -1698,8 +1698,31 @@ impl Piece {
                         let snow = self.state_of(ctx, "minecraft:snow", &[("layers", &layers)]);
                         self.set(ctx, at, snow);
                     }
-                    if chances.lush && air && solid_below && below == Some(self.blocks.main) {
-                        self.set(ctx, at, moss);
+                    let world = self.spec.local_to_world(at);
+                    if chances.lush {
+                        // CaveFeatures.MOSS_PATCH, LUSH_CAVES_CLAY and MOSS_PATCH_CEILING, each at 0.5%.
+                        for feature in [
+                            "minecraft:moss_patch",
+                            "minecraft:lush_caves_clay",
+                            "minecraft:moss_patch_ceiling",
+                        ] {
+                            if self.roll(ctx) < 0.005 {
+                                self.feature(ctx, feature, world);
+                            }
+                        }
+                        if air && solid_below && below == Some(self.blocks.main) {
+                            self.set(ctx, at, moss);
+                        }
+                    }
+                    if chances.dripstone {
+                        // CaveFeatures.DRIPSTONE_CLUSTER and POINTED_DRIPSTONE, each at 2%.
+                        for feature in
+                            ["minecraft:dripstone_cluster", "minecraft:pointed_dripstone"]
+                        {
+                            if self.roll(ctx) < 0.02 {
+                                self.feature(ctx, feature, world);
+                            }
+                        }
                     }
                     if chances.cactus > 0.0 && self.roll(ctx) < chances.cactus && air {
                         let on_sand = below.is_some_and(|s| sand.contains(&s));
@@ -1727,6 +1750,13 @@ impl Piece {
                     }
                 }
             }
+        }
+    }
+
+    /// `ConfiguredFeature.place` of a vanilla cave feature at a world position.
+    fn feature(&self, ctx: &mut dyn PieceContext, feature: &str, world: [i32; 3]) {
+        if let Err(error) = ctx.place_feature(feature, world) {
+            eprintln!("[bettermineshafts] {feature} at {world:?} not placed: {error:?}");
         }
     }
 
