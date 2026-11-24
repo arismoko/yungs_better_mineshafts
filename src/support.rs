@@ -501,7 +501,7 @@ pub fn declare_commands(commands: &mut Vec<CommandRegistration>) {
 fn send(host: &mut dyn ServerHost, lines: Vec<String>) -> i32 {
     let count = lines.len() as i32;
     for line in lines {
-        let _ = host.commands().feedback(Text::literal(line));
+        let _ = host.commands().feedback(Text::literal(line), false);
     }
     count
 }
