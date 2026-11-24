@@ -314,9 +314,13 @@ pub struct Box3 {
 }
 
 /// The largest span a saved piece box may have on one axis. A legitimate piece
-/// is at most the corridor's 24; a corrupt or crafted world otherwise makes the
-/// generator iterate an attacker-sized range.
+/// is at most the corridor's 24, or the entrance's 49 across; a corrupt or crafted world
+/// otherwise makes the generator iterate an attacker-sized range.
 pub const MAX_SAVED_SPAN: i32 = 64;
+
+/// The tallest saved entrance box: its box reaches from the mineshaft's floor to the top of the
+/// level, so it may be as tall as a level (`DimensionType.Y_SIZE`).
+pub const MAX_SAVED_ENTRANCE_HEIGHT: i32 = 4064;
 
 impl Box3 {
     pub fn new(min: [i32; 3], max: [i32; 3]) -> Self {
@@ -341,10 +345,16 @@ impl Box3 {
         Some(spans)
     }
 
-    /// Whether every axis is between 1 and [`MAX_SAVED_SPAN`] blocks long.
-    pub fn is_plausible(&self) -> bool {
+    /// Whether every axis is between 1 and [`MAX_SAVED_SPAN`] blocks long, or for an entrance's
+    /// height [`MAX_SAVED_ENTRANCE_HEIGHT`].
+    pub fn is_plausible(&self, kind: PieceKind) -> bool {
+        let height = if kind == PieceKind::Entrance {
+            MAX_SAVED_ENTRANCE_HEIGHT
+        } else {
+            MAX_SAVED_SPAN
+        };
         self.span_checked()
-            .is_some_and(|spans| spans.iter().all(|span| *span <= MAX_SAVED_SPAN))
+            .is_some_and(|[x, y, z]| x <= MAX_SAVED_SPAN && y <= height && z <= MAX_SAVED_SPAN)
     }
 
     pub fn is_inside(&self, position: [i32; 3]) -> bool {
@@ -440,6 +450,9 @@ pub struct PieceSpec {
     /// An ore deposit's ore, an index into [`Settings::ore_weights`]; for a workstation room, 1 when a
     /// dungeon lies below it; 0 otherwise.
     pub variant: i32,
+    /// The entrance only: where its shaft and surface tunnel go, decided once for the whole
+    /// mineshaft ([`entrance_site`]); `None` builds no shaft, as upstream's `hasTunnel` false.
+    pub entrance: Option<EntranceSite>,
 }
 
 impl PieceSpec {
@@ -655,6 +668,63 @@ pub fn entrance_box(start: [i32; 3], floor_y: i32, world_max_y: i32) -> Box3 {
     )
 }
 
+/// Where the entrance's shaft ends and where its surface tunnel runs, in the piece's frame
+/// (`VerticalEntrance`'s `yAxisLen`, `tunnelDirection`, `tunnelLength` and `tunnelFloorAltitude`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntranceSite {
+    pub shaft_top: i32,
+    pub tunnel_dir: Facing,
+    pub tunnel_len: i32,
+    pub tunnel_floor: i32,
+}
+
+/// `VerticalEntrance.determineDirection`: the shaft's top and the tunnel's direction, length and
+/// floor, from `surface(x, z)`, the topmost non-air block of a column (`SurfaceHelper`).
+///
+/// Upstream decides this in the first chunk that finds a drop-off and saves it with the piece, so
+/// every other chunk builds the same shaft and tunnel. Here it is decided once when the mineshaft
+/// starts, from the generator's terrain, and saved the same way: a chunk's own view of the
+/// terrain around it would differ from its neighbours' and give each its own tunnel.
+pub fn entrance_site(
+    entrance: &PieceSpec,
+    mut surface: impl FnMut(i32, i32) -> i32,
+) -> Option<EntranceSite> {
+    let centre = entrance.local_to_world([ENTRANCE_RADIUS, 0, ENTRANCE_RADIUS]);
+    let top_y = entrance.bounds.max[1];
+    let mut lowest = top_y;
+    for dx in -2..=2 {
+        for dz in -2..=2 {
+            let height = surface(centre[0] + dx, centre[2] + dz);
+            if height > 1 {
+                lowest = lowest.min(height);
+            }
+        }
+    }
+    if lowest < ENTRANCE_MIN_SURFACE || lowest == top_y {
+        return None;
+    }
+    let ceiling = lowest - 2;
+    let floor = ceiling - 4;
+    for radial in 0..3 {
+        for dir in [Facing::North, Facing::South, Facing::West, Facing::East] {
+            let step = dir.step();
+            for i in radial * 8..radial * 8 + 8 {
+                let offset = 2 + i;
+                let height = surface(centre[0] + step[0] * offset, centre[2] + step[2] * offset);
+                if height <= floor && height > 1 {
+                    return Some(EntranceSite {
+                        shaft_top: ceiling - entrance.bounds.min[1],
+                        tunnel_dir: dir,
+                        tunnel_len: i,
+                        tunnel_floor: floor - entrance.bounds.min[1],
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
 /// `BoundingBoxHelper.boxFromCoordsWithRotation`: the box a piece of `dims` (secondary, height,
 /// main) occupies when its anchor corner is `(x, y, z)` and it runs into `dir`.
 pub fn java_box(x: i32, y: i32, z: i32, dir: Facing, dims: [i32; 3]) -> Box3 {
@@ -747,6 +817,7 @@ impl<R: Roll> Layout<'_, R> {
             depth,
             openings: Vec::new(),
             variant,
+            entrance: None,
         };
         push(self.assembly, spec, self.budget)
     }
@@ -772,6 +843,7 @@ impl<R: Roll> Layout<'_, R> {
             depth: chain + 1,
             openings: Vec::new(),
             variant: 0,
+            entrance: None,
         });
         let index = self.assembly.pieces.len() - 1;
         self.big_tunnel_children(index);
@@ -1070,6 +1142,7 @@ pub fn assemble<R: Roll>(random: &mut R, request: &LayoutRequest) -> Assembly {
         depth: -1,
         openings: Vec::new(),
         variant: 0,
+        entrance: None,
     };
     push(&mut assembly, entrance, request.budget);
 
@@ -1729,6 +1802,31 @@ mod tests {
     }
 
     #[test]
+    fn the_entrance_tunnel_runs_to_the_first_drop_off_and_needs_high_ground() {
+        let assembly = assemble_with(0);
+        let entrance = &assembly.pieces[0];
+        let [cx, floor_y, cz] = [assembly.start[0], entrance.bounds.min[1], assembly.start[2]];
+        // Ground at 80 everywhere but one column 10 blocks east, at 70: the search's second ring
+        // (8 to 15 blocks out, after every direction's first ring) finds it as i = 8.
+        let site = entrance_site(
+            entrance,
+            |x, z| if (x, z) == (cx + 10, cz) { 70 } else { 80 },
+        );
+        assert_eq!(
+            site,
+            Some(EntranceSite {
+                shaft_top: 78 - floor_y,
+                tunnel_dir: Facing::East,
+                tunnel_len: 8,
+                tunnel_floor: 74 - floor_y,
+            })
+        );
+        // No drop-off within 24 blocks, or ground under 60 over the shaft: no entrance.
+        assert_eq!(entrance_site(entrance, |_, _| 80), None);
+        assert_eq!(entrance_site(entrance, |_, _| 59), None);
+    }
+
+    #[test]
     fn a_floor_under_the_world_floor_is_clamped_and_recorded() {
         let request = LayoutRequest {
             floor_y: -300,
@@ -2072,7 +2170,7 @@ mod tests {
             Some([9, 8, 24])
         );
         assert!(
-            Box3::new([0, 0, 0], [8, 7, 23]).is_plausible(),
+            Box3::new([0, 0, 0], [8, 7, 23]).is_plausible(PieceKind::Corridor),
             "the corridor's own box"
         );
         assert_eq!(
@@ -2086,9 +2184,14 @@ mod tests {
             "a span that does not fit an i32"
         );
         assert!(
-            !Box3::new([0, 0, 0], [1_000_000, 0, 0]).is_plausible(),
+            !Box3::new([0, 0, 0], [1_000_000, 0, 0]).is_plausible(PieceKind::Corridor),
             "an attacker-sized axis"
         );
+        // The entrance's box runs to the top of the level; only its height may pass 64.
+        let entrance = Box3::new([-24, -20, -24], [24, 320, 24]);
+        assert!(entrance.is_plausible(PieceKind::Entrance));
+        assert!(!entrance.is_plausible(PieceKind::Corridor));
+        assert!(!Box3::new([-24, -64, -24], [24, 4000, 24]).is_plausible(PieceKind::Entrance));
     }
 
     #[test]

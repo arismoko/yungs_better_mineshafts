@@ -10,8 +10,8 @@ use std::sync::{Arc, RwLock};
 
 use mod_api::{
     self, BlockMetadata, Command, CommandRegistration, Compound, FoundStructure, GenerationContext,
-    Host, RandomSource, Registrar, ServerHost, SettingSpec, StructureError, StructurePiece,
-    StructureType, Tag, Text,
+    HeightmapType, Host, RandomSource, Registrar, ServerHost, SettingSpec, StructureError,
+    StructurePiece, StructureType, Tag, Text,
 };
 
 use crate::pieces::{self, Piece};
@@ -59,12 +59,21 @@ impl StructureType for MineshaftType {
             budget: runtime::MAX_PIECES,
             settings,
         };
-        let assembly = {
+        let mut assembly = {
             let mut random = EngineRoll(ctx.random());
             runtime::assemble(&mut random, &request)
         };
         if assembly.pieces.is_empty() {
             return None;
+        }
+        // The entrance's shaft and tunnel, decided once for every chunk it spans. The generator's
+        // first free height less one is `SurfaceHelper.getSurfaceHeight`'s topmost non-air block.
+        for spec in &mut assembly.pieces {
+            if spec.kind == runtime::PieceKind::Entrance {
+                spec.entrance = runtime::entrance_site(spec, |x, z| {
+                    ctx.base_height(x, z, HeightmapType::WorldSurfaceWg) - 1
+                });
+            }
         }
         // What the readout's `last` answers, so a game run can find a rare piece (a stair) exactly.
         record_start(chunk_xz, &assembly);

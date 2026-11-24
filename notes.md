@@ -668,3 +668,20 @@ gains `0.2.2`; nothing is replaced.
 - **Known gaps:** turns, layered intersections, ore deposits, zombie-villager rooms; the
   terrain-driven surface tunnel; biome decorations; minecarts/chests/furnaces; vanilla mineshafts
   still generate. All in `notes.md`.
+
+## Slice: one surface tunnel per mineshaft (2026-11-24, pin ebd2d22)
+
+In game on ebd2d22, a chunk next to the shaft could carve a second surface tunnel that ended in
+solid ground at its chunk edge (oak at -896, 192; mesa at -4928, -4864). Each chunk ran
+`determineDirection` itself, reading heights through its own `PieceContext`, and a neighbour that
+saw the terrain differently chose another direction. Upstream decides in the first chunk that finds
+a drop-off and saves the result on the piece (`hasTunnel`, `tunnelDir`, `tunnelLen`,
+`floorAltitude`), so every chunk builds the same tunnel.
+
+`runtime::entrance_site` now decides once, in `find_generation_point`, from the generator's
+`base_height(WorldSurfaceWg) - 1` (the topmost non-air block `SurfaceHelper.getSurfaceHeight`
+reads), and the entrance saves it under `entrance`. The generator's terrain is what the chunks see
+before carvers and features, so a surface a carver opened is not a drop-off here.
+
+Saved entrances could not load before this: their box reaches the top of the level, past the
+64-block guard on saved boxes. An entrance's height may now be up to `DimensionType.Y_SIZE` (4064).

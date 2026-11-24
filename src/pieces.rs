@@ -24,13 +24,13 @@
 use std::sync::Arc;
 
 use mod_api::{
-    self, BlockMetadata, BlockState, BoundingBox, Compound, HeightmapType, PieceContext,
-    StructureError, StructurePiece, Tag,
+    self, BlockMetadata, BlockState, BoundingBox, Compound, PieceContext, StructureError,
+    StructurePiece, Tag,
 };
 
 use crate::runtime::{
-    self, BlockRef, Box3, Facing, LegVariant, Opening, Palette, PieceKind, PieceSpec, Randomizer,
-    Weighted,
+    self, BlockRef, Box3, EntranceSite, Facing, LegVariant, Opening, Palette, PieceKind, PieceSpec,
+    Randomizer, Weighted,
 };
 
 /// How far a leg reaches down before the port stops looking for ground.
@@ -356,14 +356,6 @@ pub struct Piece {
     pub settings: runtime::Settings,
 }
 
-/// Where the entrance's shaft ends and where its surface tunnel runs, in the piece's frame.
-struct EntranceSite {
-    shaft_top: i32,
-    tunnel_dir: Facing,
-    tunnel_len: i32,
-    tunnel_floor: i32,
-}
-
 /// The entrance's centre column in its own frame (`VerticalEntrance`'s 24 of 0..48).
 const ENTRANCE_CENTRE: i32 = runtime::ENTRANCE_RADIUS;
 
@@ -506,67 +498,14 @@ impl Piece {
         }
     }
 
-    /// `VerticalEntrance.postProcess`: the terrain decides everything. Nothing is built unless a
-    /// drop-off lies within 24 blocks, and then the shaft reaches up to two blocks under the
-    /// lowest ground over its 5×5 and a tunnel runs out to the open face.
+    /// `VerticalEntrance.postProcess`: the shaft and surface tunnel the mineshaft's start chose
+    /// ([`runtime::entrance_site`]), or nothing when no drop-off lay within 24 blocks.
     fn write_entrance(&self, ctx: &mut dyn PieceContext) {
-        let Some(site) = self.entrance_site(ctx) else {
+        let Some(site) = self.spec.entrance else {
             return;
         };
         self.write_shaft(ctx, site.shaft_top);
         self.write_surface_tunnel(ctx, &site);
-    }
-
-    /// `determineDirection`: the shaft's top and the tunnel's direction, length and floor.
-    fn entrance_site(&self, ctx: &mut dyn PieceContext) -> Option<EntranceSite> {
-        let centre = self
-            .spec
-            .local_to_world([ENTRANCE_CENTRE, 0, ENTRANCE_CENTRE]);
-        let top_y = self.spec.bounds.max[1];
-        // `SurfaceHelper.getSurfaceHeight`: the topmost non-air block, which is the heightmap
-        // value less one.
-        let surface = |ctx: &mut dyn PieceContext, x: i32, z: i32| {
-            ctx.height(HeightmapType::WorldSurfaceWg, x, z)
-                .map(|h| h - 1)
-        };
-        let mut lowest = top_y;
-        for dx in -2..=2 {
-            for dz in -2..=2 {
-                if let Some(height) = surface(ctx, centre[0] + dx, centre[2] + dz)
-                    && height > 1
-                {
-                    lowest = lowest.min(height);
-                }
-            }
-        }
-        if lowest < runtime::ENTRANCE_MIN_SURFACE || lowest == top_y {
-            return None;
-        }
-        let ceiling = lowest - 2;
-        let floor = ceiling - 4;
-        for radial in 0..3 {
-            for dir in [Facing::North, Facing::South, Facing::West, Facing::East] {
-                let step = dir.step();
-                let reach = 8 * radial + 2;
-                for i in radial * 8..radial * 8 + 8 {
-                    let offset = reach + i - radial * 8;
-                    let x = centre[0] + step[0] * offset;
-                    let z = centre[2] + step[2] * offset;
-                    if let Some(height) = surface(ctx, x, z)
-                        && height <= floor
-                        && height > 1
-                    {
-                        return Some(EntranceSite {
-                            shaft_top: ceiling - self.spec.bounds.min[1],
-                            tunnel_dir: dir,
-                            tunnel_len: i,
-                            tunnel_floor: floor - self.spec.bounds.min[1],
-                        });
-                    }
-                }
-            }
-        }
-        None
     }
 
     /// The local axis (0 or 2) a world direction runs along in this piece's frame, and its sign.
@@ -2053,6 +1992,17 @@ impl StructurePiece for Piece {
         if !openings.is_empty() {
             tag.insert("openings".into(), Tag::List(openings));
         }
+        if let Some(site) = self.spec.entrance {
+            tag.insert(
+                "entrance".into(),
+                Tag::IntArray(vec![
+                    site.shaft_top,
+                    facing_code(site.tunnel_dir),
+                    site.tunnel_len,
+                    site.tunnel_floor,
+                ]),
+            );
+        }
         tag.insert("palette".into(), encode_palette(&self.palette));
     }
 }
@@ -2119,7 +2069,7 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
     // Reject a corrupt or crafted box before any generator loop uses it: an
     // inverted, overflowing or attacker-sized span would make `patch_shell`
     // iterate a range no world can hold (the review finding).
-    if !box_.is_plausible() {
+    if !box_.is_plausible(kind) {
         return Err(StructureError(
             "bettermineshafts: a saved piece box is outside the plausible span".into(),
         ));
@@ -2157,6 +2107,26 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
             openings.push(Opening { along, len, side });
         }
     }
+    // The entrance's site: both heights inside the box, the tunnel within the 24 blocks
+    // `determineDirection` searches.
+    let entrance = match root.get("entrance") {
+        Some(Tag::IntArray(values)) if kind == PieceKind::Entrance && values.len() == 4 => {
+            let tunnel_dir = facing_from_code(values[1]).ok_or_else(|| {
+                StructureError(format!(
+                    "bettermineshafts: a saved entrance names direction {}",
+                    values[1]
+                ))
+            })?;
+            let height = spans[1] - 1;
+            Some(EntranceSite {
+                shaft_top: values[0].clamp(0, height),
+                tunnel_dir,
+                tunnel_len: values[2].clamp(0, 3 * 8 - 1),
+                tunnel_floor: values[3].clamp(0, height),
+            })
+        }
+        _ => None,
+    };
     let palette = root
         .get("palette")
         .ok_or_else(|| StructureError("bettermineshafts: a saved piece has no palette".into()))
@@ -2169,6 +2139,7 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
             depth,
             openings,
             variant,
+            entrance,
         },
         palette,
     ))
@@ -2450,6 +2421,29 @@ mod tests {
         assert_eq!(decoded.decorations.mushroom, 0.0625);
         assert!(decoded.decorations.lush && !decoded.decorations.dripstone);
         assert_eq!(decoded.blocks.main.property("waterlogged"), Some("false"));
+    }
+
+    #[test]
+    fn a_saved_entrance_keeps_its_shaft_and_tunnel() {
+        let mut tag = Compound::new();
+        tag.insert("kind".into(), Tag::String("entrance".into()));
+        tag.insert("facing".into(), Tag::String("north".into()));
+        tag.insert("BB".into(), Tag::IntArray(vec![-24, -20, -24, 24, 320, 24]));
+        tag.insert("entrance".into(), Tag::IntArray(vec![98, 3, 8, 94]));
+        tag.insert("palette".into(), encode_palette(&Palette::oak_defaults()));
+        let (spec, _) = piece_from_tag(&tag).expect("a saved entrance loads");
+        assert_eq!(
+            spec.entrance,
+            Some(EntranceSite {
+                shaft_top: 98,
+                tunnel_dir: Facing::East,
+                tunnel_len: 8,
+                tunnel_floor: 94,
+            })
+        );
+        // An entrance saved with no site (no drop-off found) builds nothing.
+        tag.remove(&"entrance".into());
+        assert_eq!(piece_from_tag(&tag).expect("loads").0.entrance, None);
     }
 
     #[test]
