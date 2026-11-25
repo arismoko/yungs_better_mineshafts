@@ -68,7 +68,7 @@ impl Hooks for Mod {
     fn player_command(
         &self,
         _host: &mut dyn ServerHost,
-        event: &mut PlayerCommandEvent<'_>,
+        event: &mut PlayerCommandEvent<'_, '_>,
     ) -> Flow {
         if !locates_vanilla_mineshaft(event.command) {
             return Flow::Continue;
@@ -76,7 +76,7 @@ impl Hooks for Mod {
         // A command exception shows in red (`CommandSourceStack.sendFailure`).
         let mut message = Text::literal(LOCATE_HINT);
         message.style.color = Some("red".to_owned());
-        event.replies.push(message);
+        let _ = event.replies.push(message);
         Flow::Cancel
     }
 }
