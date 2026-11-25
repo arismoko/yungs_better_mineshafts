@@ -10,8 +10,8 @@ use std::sync::{Arc, RwLock};
 
 use mod_api::{
     self, BlockMetadata, Command, CommandRegistration, Compound, FoundStructure, GenerationContext,
-    HeightmapType, Host, RandomSource, Registrar, ServerHost, SettingSpec, StructureError,
-    StructurePiece, StructureType, Tag, Text,
+    HeightmapType, Host, RandomSource, Registrar, ServerHost, SettingKey, SettingSpec,
+    SettingValue, StructureError, StructurePiece, StructureType, Tag, Text,
 };
 
 use crate::pieces::{self, Piece};
@@ -327,7 +327,12 @@ const FIELDS: [(&str, Field); 23] = [
     ),
 ];
 
+/// The keys the game issued for [`FIELDS`], in order; `None` where a registration was refused.
+/// Replaced whenever the settings are declared again.
+static SETTING_KEYS: RwLock<Vec<Option<SettingKey>>> = RwLock::new(Vec::new());
+
 fn declare_settings(r: &mut dyn Registrar) {
+    let mut keys = Vec::with_capacity(FIELDS.len());
     let mut defaults = Settings::DEFAULT;
     for (key, field) in FIELDS {
         let label = format!("{}.configuration.{key}", runtime::MOD_ID);
@@ -345,8 +350,14 @@ fn declare_settings(r: &mut dyn Registrar) {
             }
             Field::Toggle(at) => SettingSpec::toggle(key, label.as_str(), *at(&mut defaults)),
         };
-        let _ = r.register_setting(spec.tooltip(format!("{label}.tooltip")));
+        keys.push(
+            r.register_setting(spec.tooltip(format!("{label}.tooltip")))
+                .ok(),
+        );
     }
+    *SETTING_KEYS
+        .write()
+        .expect("the setting keys lock is not poisoned") = keys;
 }
 
 /// Take the player's settings for the server about to start: NeoForge reads a `worldRestart`
@@ -354,30 +365,22 @@ fn declare_settings(r: &mut dyn Registrar) {
 /// cannot give keeps the original's default.
 pub fn read_settings(host: &dyn Host) {
     let mut read = Settings::DEFAULT;
-    for (key, field) in FIELDS {
-        let Some(value) = host.setting(runtime::MOD_ID, key) else {
+    let keys = SETTING_KEYS
+        .read()
+        .expect("the setting keys lock is not poisoned");
+    for ((_, field), key) in FIELDS.into_iter().zip(keys.iter()) {
+        let Some(Ok(value)) = key.map(|key| host.setting(key)) else {
             continue;
         };
-        match field {
-            Field::Toggle(at) => match value.as_str() {
-                "true" => *at(&mut read) = true,
-                "false" => *at(&mut read) = false,
-                _ => {}
-            },
-            Field::Int(at, ..) => {
-                if let Ok(number) = value.parse::<f64>()
-                    && number.is_finite()
-                {
-                    *at(&mut read) = number.round() as i32;
-                }
+        match (field, value) {
+            (Field::Toggle(at), SettingValue::Toggle(on)) => *at(&mut read) = on,
+            (Field::Int(at, ..), SettingValue::Range(number)) if number.is_finite() => {
+                *at(&mut read) = number.round() as i32;
             }
-            Field::Rate(at) => {
-                if let Ok(number) = value.parse::<f64>()
-                    && number.is_finite()
-                {
-                    *at(&mut read) = number;
-                }
+            (Field::Rate(at), SettingValue::Range(number)) if number.is_finite() => {
+                *at(&mut read) = number;
             }
+            _ => {}
         }
     }
     *SETTINGS.write().expect("the settings lock is not poisoned") = read;

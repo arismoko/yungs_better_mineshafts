@@ -29,7 +29,7 @@ cargo sunrise-mod run      # builds it and starts the game with it
 cargo test
 ```
 
-`sunrise-mod.toml` pins the Sunrise Dev build `dev-2026-11-22-7cfdf81` (game commit `7cfdf81463`). Sunrise builds native mods from source on the player's computer, against the exact game build.
+`sunrise-mod.toml` pins the Sunrise Dev build `dev-2026-11-25-bdad86d` (game commit `bdad86d2d3`). Sunrise builds native mods from source on the player's computer, against the exact game build.
 
 ## Licence and credits
 

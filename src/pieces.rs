@@ -262,7 +262,9 @@ pub fn resolve(
         iron_bars,
         crafting_table,
     ] = <[BlockState; 7]>::try_from(always).map_err(|_| {
-        StructureError("bettermineshafts: the fixed block table is the wrong length".into())
+        StructureError::new(std::io::Error::other(
+            "bettermineshafts: the fixed block table is the wrong length",
+        ))
     })?;
     let extra = resolve_extra(metadata)?;
     Ok(Resolved {
@@ -287,23 +289,31 @@ pub fn resolve(
         iron_bars,
         crafting_table,
         ladders: <[BlockState; 4]>::try_from(ladders).map_err(|_| {
-            StructureError("bettermineshafts: the ladder table is the wrong length".into())
+            StructureError::new(std::io::Error::other(
+                "bettermineshafts: the ladder table is the wrong length",
+            ))
         })?,
         vines: <[BlockState; 4]>::try_from(vines).map_err(|_| {
-            StructureError("bettermineshafts: the vine table is the wrong length".into())
+            StructureError::new(std::io::Error::other(
+                "bettermineshafts: the vine table is the wrong length",
+            ))
         })?,
         wall_torches: <[BlockState; 4]>::try_from(wall_torches).map_err(|_| {
-            StructureError("bettermineshafts: the wall torch table is the wrong length".into())
+            StructureError::new(std::io::Error::other(
+                "bettermineshafts: the wall torch table is the wrong length",
+            ))
         })?,
         flat_rails,
         ascending_rails: <[BlockState; 4]>::try_from(ascending_rails).map_err(|_| {
-            StructureError("bettermineshafts: the ascending rail table is the wrong length".into())
+            StructureError::new(std::io::Error::other(
+                "bettermineshafts: the ascending rail table is the wrong length",
+            ))
         })?,
         powered_ascending_rails: <[BlockState; 4]>::try_from(powered_ascending_rails).map_err(
             |_| {
-                StructureError(
-                    "bettermineshafts: the powered rail table is the wrong length".into(),
-                )
+                StructureError::new(std::io::Error::other(
+                    "bettermineshafts: the powered rail table is the wrong length",
+                ))
             },
         )?,
     })
@@ -314,10 +324,10 @@ fn resolve_state(
     reference: &BlockRef,
 ) -> Result<BlockState, StructureError> {
     let block = crate::support::key_for(&reference.name).ok_or_else(|| {
-        StructureError(format!(
+        StructureError::new(std::io::Error::other(format!(
             "bettermineshafts: the palette names block {}, which the mod did not request",
             reference.name
-        ))
+        )))
     })?;
     let constraints: Vec<mod_api::StateConstraint> = reference
         .properties
@@ -325,10 +335,10 @@ fn resolve_state(
         .map(|(name, value)| mod_api::StateConstraint::new(name.as_str(), value.as_str()))
         .collect();
     BlockState::of(metadata, block, &constraints).map_err(|error| {
-        StructureError(format!(
+        StructureError::new(std::io::Error::other(format!(
             "bettermineshafts: {} {:?} is not a state: {error:?}",
             reference.name, reference.properties
-        ))
+        )))
     })
 }
 
@@ -2067,7 +2077,11 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
             .and_then(|name| PieceKind::from_name(&name)),
         _ => None,
     }
-    .ok_or_else(|| StructureError("bettermineshafts: a saved piece has no kind".into()))?;
+    .ok_or_else(|| {
+        StructureError::new(std::io::Error::other(
+            "bettermineshafts: a saved piece has no kind",
+        ))
+    })?;
     let facing = match root.get("facing") {
         Some(Tag::String(name)) => name
             .to_string()
@@ -2075,7 +2089,11 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
             .and_then(|name| Facing::from_name(&name)),
         _ => None,
     }
-    .ok_or_else(|| StructureError("bettermineshafts: a saved piece has no facing".into()))?;
+    .ok_or_else(|| {
+        StructureError::new(std::io::Error::other(
+            "bettermineshafts: a saved piece has no facing",
+        ))
+    })?;
     // A saved depth only selects generation behaviour; clamp it like the box.
     let depth = match root.get("depth") {
         Some(Tag::Int(depth)) => (*depth).clamp(0, runtime::MAX_SAVED_SPAN),
@@ -2091,40 +2109,42 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
             [values[3], values[4], values[5]],
         ),
         _ => {
-            return Err(StructureError(
-                "bettermineshafts: a saved piece has no BB".into(),
-            ));
+            return Err(StructureError::new(std::io::Error::other(
+                "bettermineshafts: a saved piece has no BB",
+            )));
         }
     };
     // Reject a corrupt or crafted box before any generator loop uses it: an
     // inverted, overflowing or attacker-sized span would make `patch_shell`
     // iterate a range no world can hold (the review finding).
     if !box_.is_plausible(kind) {
-        return Err(StructureError(
-            "bettermineshafts: a saved piece box is outside the plausible span".into(),
-        ));
+        return Err(StructureError::new(std::io::Error::other(
+            "bettermineshafts: a saved piece box is outside the plausible span",
+        )));
     }
-    let spans = box_
-        .span_checked()
-        .ok_or_else(|| StructureError("bettermineshafts: a saved piece box has no span".into()))?;
+    let spans = box_.span_checked().ok_or_else(|| {
+        StructureError::new(std::io::Error::other(
+            "bettermineshafts: a saved piece box has no span",
+        ))
+    })?;
     let mut openings = Vec::new();
     if let Some(Tag::List(list)) = root.get("openings") {
         for entry in list {
             let Tag::IntArray(values) = entry else {
-                return Err(StructureError(
-                    "bettermineshafts: a saved opening is not an int array".into(),
-                ));
+                return Err(StructureError::new(std::io::Error::other(
+                    "bettermineshafts: a saved opening is not an int array",
+                )));
             };
             if values.len() != 3 {
-                return Err(StructureError(
-                    "bettermineshafts: a saved opening is not [along, len, side]".into(),
-                ));
+                return Err(StructureError::new(std::io::Error::other(
+                    "bettermineshafts: a saved opening is not [along, len, side]",
+                )));
             }
             let side = facing_from_code(values[2]).ok_or_else(|| {
-                StructureError(format!(
+                StructureError::new(std::io::Error::other(format!(
                     "bettermineshafts: a saved opening names side {}",
                     values[2]
-                ))
+                )))
             })?;
             // Openings run along the piece's length (local z); clamp both ends
             // so `along..along + len` cannot overflow or run past the piece.
@@ -2142,10 +2162,10 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
     let entrance = match root.get("entrance") {
         Some(Tag::IntArray(values)) if kind == PieceKind::Entrance && values.len() == 4 => {
             let tunnel_dir = facing_from_code(values[1]).ok_or_else(|| {
-                StructureError(format!(
+                StructureError::new(std::io::Error::other(format!(
                     "bettermineshafts: a saved entrance names direction {}",
                     values[1]
-                ))
+                )))
             })?;
             let height = spans[1] - 1;
             Some(EntranceSite {
@@ -2159,7 +2179,11 @@ pub fn piece_from_tag(tag: &Compound) -> Result<(PieceSpec, Palette), StructureE
     };
     let palette = root
         .get("palette")
-        .ok_or_else(|| StructureError("bettermineshafts: a saved piece has no palette".into()))
+        .ok_or_else(|| {
+            StructureError::new(std::io::Error::other(
+                "bettermineshafts: a saved piece has no palette",
+            ))
+        })
         .and_then(decode_palette)?;
     Ok((
         PieceSpec {
@@ -2255,22 +2279,30 @@ fn encode_randomizer(randomizer: &Randomizer) -> Tag {
 
 /// Decode a saved palette strictly: a missing or malformed field is a typed error, never a default.
 pub fn decode_palette(tag: &Tag) -> Result<Palette, StructureError> {
-    let blocks = tag
-        .get("blocks")
-        .ok_or_else(|| StructureError("bettermineshafts: a palette has no blocks".into()))?;
-    let randomizers = tag
-        .get("randomizers")
-        .ok_or_else(|| StructureError("bettermineshafts: a palette has no randomizers".into()))?;
-    let decorations = tag
-        .get("decorations")
-        .ok_or_else(|| StructureError("bettermineshafts: a palette has no decorations".into()))?;
+    let blocks = tag.get("blocks").ok_or_else(|| {
+        StructureError::new(std::io::Error::other(
+            "bettermineshafts: a palette has no blocks",
+        ))
+    })?;
+    let randomizers = tag.get("randomizers").ok_or_else(|| {
+        StructureError::new(std::io::Error::other(
+            "bettermineshafts: a palette has no randomizers",
+        ))
+    })?;
+    let decorations = tag.get("decorations").ok_or_else(|| {
+        StructureError::new(std::io::Error::other(
+            "bettermineshafts: a palette has no decorations",
+        ))
+    })?;
     let leg_variant = match tag.get("legVariant") {
         Some(Tag::String(name)) => name
             .to_string()
             .ok()
             .and_then(|name| LegVariant::from_name(&name))
             .ok_or_else(|| {
-                StructureError("bettermineshafts: a saved legVariant is unknown".into())
+                StructureError::new(std::io::Error::other(
+                    "bettermineshafts: a saved legVariant is unknown",
+                ))
             })?,
         _ => LegVariant::Edge,
     };
@@ -2307,17 +2339,21 @@ pub fn decode_palette(tag: &Tag) -> Result<Palette, StructureError> {
 }
 
 fn decode_block(parent: &Tag, key: &str) -> Result<BlockRef, StructureError> {
-    let entry = parent
-        .get(key)
-        .ok_or_else(|| StructureError(format!("bettermineshafts: a palette has no block {key}")))?;
+    let entry = parent.get(key).ok_or_else(|| {
+        StructureError::new(std::io::Error::other(format!(
+            "bettermineshafts: a palette has no block {key}"
+        )))
+    })?;
     let name = match entry.get("id") {
-        Some(Tag::String(name)) => name
-            .to_string()
-            .map_err(|_| StructureError("bettermineshafts: a block name is not UTF-8".into()))?,
+        Some(Tag::String(name)) => name.to_string().map_err(|_| {
+            StructureError::new(std::io::Error::other(
+                "bettermineshafts: a block name is not UTF-8",
+            ))
+        })?,
         _ => {
-            return Err(StructureError(format!(
+            return Err(StructureError::new(std::io::Error::other(format!(
                 "bettermineshafts: block {key} has no id"
-            )));
+            ))));
         }
     };
     let mut properties = Vec::new();
@@ -2325,22 +2361,26 @@ fn decode_block(parent: &Tag, key: &str) -> Result<BlockRef, StructureError> {
         for property in list {
             let name = match property.get("name") {
                 Some(Tag::String(value)) => value.to_string().map_err(|_| {
-                    StructureError("bettermineshafts: a property name is not UTF-8".into())
+                    StructureError::new(std::io::Error::other(
+                        "bettermineshafts: a property name is not UTF-8",
+                    ))
                 })?,
                 _ => {
-                    return Err(StructureError(
-                        "bettermineshafts: a property has no name".into(),
-                    ));
+                    return Err(StructureError::new(std::io::Error::other(
+                        "bettermineshafts: a property has no name",
+                    )));
                 }
             };
             let value = match property.get("value") {
                 Some(Tag::String(value)) => value.to_string().map_err(|_| {
-                    StructureError("bettermineshafts: a property value is not UTF-8".into())
+                    StructureError::new(std::io::Error::other(
+                        "bettermineshafts: a property value is not UTF-8",
+                    ))
                 })?,
                 _ => {
-                    return Err(StructureError(
-                        "bettermineshafts: a property has no value".into(),
-                    ));
+                    return Err(StructureError::new(std::io::Error::other(
+                        "bettermineshafts: a property has no value",
+                    )));
                 }
             };
             properties.push((name, value));
@@ -2351,9 +2391,9 @@ fn decode_block(parent: &Tag, key: &str) -> Result<BlockRef, StructureError> {
 
 fn decode_randomizer(parent: &Tag, key: &str) -> Result<Randomizer, StructureError> {
     let entry = parent.get(key).ok_or_else(|| {
-        StructureError(format!(
+        StructureError::new(std::io::Error::other(format!(
             "bettermineshafts: a palette has no randomizer {key}"
-        ))
+        )))
     })?;
     let default = decode_block(entry, "default")?;
     let mut entries = Vec::new();
