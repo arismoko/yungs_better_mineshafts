@@ -1,7 +1,7 @@
 # YUNG's Better Mineshafts for Sunrise: native code in src/ with its data/ and assets/.
 id = "bettermineshafts"
 name = "YUNG's Better Mineshafts"
-version = "0.3.8"
+version = "0.3.9"
 description = "Mineshafts redesigned: wide corridors, stairs and workstations, built from each biome's own wood and stone."
 authors = ["YUNGNICKYOUNG", "arismoko"]
 license = "LGPL-3.0-only"
@@ -11,4 +11,4 @@ side = "both"
 
 [native]
 game = "26.3"
-sunrise = "6a02076f89cd189d74d63492dda5b023fa85a38f"
+sunrise = "ba1f24e4ad41246b558230aa665539dc768b1287"
